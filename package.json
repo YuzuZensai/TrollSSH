@@ -10,6 +10,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
   },
   "devDependencies": {
+    "@types/fluent-ffmpeg": "^2.1.20",
     "@types/node": "^18.13.0",
     "@types/sharp": "^0.31.1",
     "@types/ssh2": "^1.11.7",
@@ -19,6 +20,7 @@
   },
   "dependencies": {
     "dotenv": "^16.0.3",
+    "fluent-ffmpeg": "^2.1.2",
     "sharp": "^0.31.3",
     "ssh2": "^1.11.0",
     "sshpk": "^1.17.0"
