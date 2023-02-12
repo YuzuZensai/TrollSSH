@@ -1,9 +1,9 @@
-id_rsa
-banner.txt
-fakelogin.txt
-goodbye.txt
-frames.json
 video.mp4
+
+#Configs
+config/
+
+#VSCode
 .vscode
 
 # Logs
