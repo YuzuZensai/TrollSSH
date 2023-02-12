@@ -1,4 +1,8 @@
 id_rsa
+banner.txt
+fakelogin.txt
+goodbye.txt
+frames.json
 
 # Logs
 logs
