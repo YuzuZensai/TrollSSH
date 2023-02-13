@@ -1,28 +1,32 @@
 {
-  "name": "trollssh",
-  "version": "1.0.0",
-  "main": "index.js",
-  "repository": "https://github.com/YuzuZensai/TrollSSH.git",
-  "author": "Yuzu | ユズ ♡ <yuzu@kirameki.cafe>",
-  "license": "GPL-3.0",
-  "scripts": {
-    "build": "tsc",
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
-  },
-  "devDependencies": {
-    "@types/fluent-ffmpeg": "^2.1.20",
-    "@types/node": "^18.13.0",
-    "@types/sharp": "^0.31.1",
-    "@types/ssh2": "^1.11.7",
-    "@types/sshpk": "^1.17.1",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^4.9.5"
-  },
-  "dependencies": {
-    "dotenv": "^16.0.3",
-    "fluent-ffmpeg": "^2.1.2",
-    "sharp": "^0.31.3",
-    "ssh2": "^1.11.0",
-    "sshpk": "^1.17.0"
-  }
+    "name": "trollssh",
+    "version": "1.0.0",
+    "main": "index.js",
+    "repository": "https://github.com/YuzuZensai/TrollSSH.git",
+    "author": "Yuzu | ユズ ♡ <yuzu@kirameki.cafe>",
+    "license": "GPL-3.0",
+    "scripts": {
+        "tsc": "tsc",
+        "build": "tsc -b",
+        "docker-build": "docker build . -t ghcr.io/yuzuzensai/trollssh:latest",
+        "docker-run": "docker run -d --name trollssh --mount type=bind,source=\"$(pwd)\"/config,target=/home/node/app/config --network host --env-file .env ghcr.io/yuzuzensai/trollssh:latest",
+        "docker-push": "docker push ghcr.io/yuzuzensai/trollssh:latest",
+        "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
+    },
+    "devDependencies": {
+        "@types/fluent-ffmpeg": "^2.1.20",
+        "@types/node": "^18.13.0",
+        "@types/sharp": "^0.31.1",
+        "@types/ssh2": "^1.11.7",
+        "@types/sshpk": "^1.17.1",
+        "ts-node-dev": "^2.0.0",
+        "typescript": "^4.9.5"
+    },
+    "dependencies": {
+        "dotenv": "^16.0.3",
+        "fluent-ffmpeg": "^2.1.2",
+        "sharp": "^0.31.3",
+        "ssh2": "^1.11.0",
+        "sshpk": "^1.17.0"
+    }
 }
