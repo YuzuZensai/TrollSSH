@@ -9,7 +9,7 @@
         "tsc": "tsc",
         "build": "tsc -b",
         "docker-build": "docker build . -t ghcr.io/yuzuzensai/trollssh:latest",
-        "docker-run": "docker run -d --name trollssh --mount type=bind,source=\"$(pwd)\"/config,target=/home/node/app/config --network host --env-file .env ghcr.io/yuzuzensai/trollssh:latest",
+        "docker-run": "docker run -d --name trollssh --mount type=bind,source=\"$(pwd)\"/config,target=/home/node/app/config --mount type=bind,source=\"$(pwd)\"/video.mp4,target=/home/node/app/video.mp4 --network host --env-file .env ghcr.io/yuzuzensai/trollssh:latest",
         "docker-push": "docker push ghcr.io/yuzuzensai/trollssh:latest",
         "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
     },
