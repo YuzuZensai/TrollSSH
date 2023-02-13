@@ -1,0 +1,14 @@
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+.git
+.gitignore
+
+node_modules
+.env
+dist
+
+config
+.vscode
+video.mp4
