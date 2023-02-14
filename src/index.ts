@@ -122,6 +122,7 @@ async function main() {
         ? parseInt(process.env.MAX_CONNECTIONS)
         : 10;
     const BRIGHTNESS_THRESHOLD = process.env.BRIGHTNESS_THRESHOLD ? parseInt(process.env.BRIGHTNESS_THRESHOLD) : 40;
+    const LOG_CREDENTIALS = process.env.LOG_CREDENTIALS ? process.env.LOG_CREDENTIALS === "true" : false;
 
     if (!fs.existsSync(path.join(process.cwd(), "config"))) {
         fs.mkdirSync(path.join(process.cwd(), "config"));
@@ -213,6 +214,14 @@ async function main() {
         });
 
         client.on("authentication", (ctx) => {
+            if (ctx.method === "password" && LOG_CREDENTIALS)
+                console.log(
+                    "Authentication from",
+                    info.ip,
+                    ctx.method,
+                    ctx.username,
+                    ctx.password
+                );
             if (!ctx.username) return ctx.reject(["password"]);
             if (ctx.method != "password") return ctx.reject(["password"]);
             if (!ctx.password) return ctx.reject(["password"]);
