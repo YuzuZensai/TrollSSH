@@ -1,2 +1,2 @@
-# TrollSSH
-💀 Fake SSH server designed to troll with ASCII video
+# 💀 TrollSSH
+Fake SSH server designed to troll with ASCII video
