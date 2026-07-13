@@ -122,7 +122,7 @@ func loadAllFrames(framesDir string) []*FramesContainer {
 				return
 			}
 			data.Name = file
-			logInfo(fmt.Sprintf("  %s: %d frames @ %gfps", file, len(data.Frames), data.FPS))
+			logInfo(fmt.Sprintf("  %s: %d frames @ %gfps", file, len(data.ColorFrames), data.FPS))
 			results[i] = data
 		}
 	}

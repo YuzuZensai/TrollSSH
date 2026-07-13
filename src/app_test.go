@@ -12,8 +12,8 @@ func TestTSFRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.tsf")
 	original := &FramesContainer{
-		Frames: [][]byte{{0, 1, 255}, {10, 20, 30}},
-		FPS:    29.97,
+		ColorFrames: [][]byte{{100, 101, 102}, {110, 120, 130}},
+		FPS:         29.97,
 	}
 	if err := writeTSF(path, original); err != nil {
 		t.Fatalf("writeTSF: %v", err)
@@ -25,14 +25,14 @@ func TestTSFRoundTrip(t *testing.T) {
 	if fc.FPS != 29.97 {
 		t.Errorf("fps = %v", fc.FPS)
 	}
-	if len(fc.Frames) != 2 {
-		t.Fatalf("frames = %d", len(fc.Frames))
+	if len(fc.ColorFrames) != 2 {
+		t.Fatalf("frames = %d color", len(fc.ColorFrames))
 	}
-	if string(fc.Frames[0]) != string([]byte{0, 1, 255}) {
-		t.Errorf("frame0 = %v", fc.Frames[0])
+	if string(fc.ColorFrames[0]) != string([]byte{100, 101, 102}) {
+		t.Errorf("color frame0 = %v", fc.ColorFrames[0])
 	}
-	if string(fc.Frames[1]) != string([]byte{10, 20, 30}) {
-		t.Errorf("frame1 = %v", fc.Frames[1])
+	if string(fc.ColorFrames[1]) != string([]byte{110, 120, 130}) {
+		t.Errorf("color frame1 = %v", fc.ColorFrames[1])
 	}
 }
 
@@ -52,13 +52,13 @@ func TestTSFInvalid(t *testing.T) {
 	}
 
 	// Valid container but fps <= 0.
-	writeTSF(path, &FramesContainer{Frames: [][]byte{{1}}, FPS: 0})
+	writeTSF(path, &FramesContainer{ColorFrames: [][]byte{{1}}, FPS: 0})
 	if _, err := loadTSF(path); err == nil {
 		t.Error("expected error for fps<=0")
 	}
 
 	// Truncated payload.
-	writeTSF(path, &FramesContainer{Frames: [][]byte{{1, 2, 3, 4}}, FPS: 30})
+	writeTSF(path, &FramesContainer{ColorFrames: [][]byte{{1, 2, 3, 4}}, FPS: 30})
 	raw, _ := os.ReadFile(path)
 	os.WriteFile(path, raw[:len(raw)-2], 0o644)
 	if _, err := loadTSF(path); err == nil {
@@ -214,5 +214,39 @@ func TestParseDimsPtyReq(t *testing.T) {
 	cols, rows, ok := parseDims(payload)
 	if !ok || cols != 100 || rows != 40 {
 		t.Errorf("parseDims = %d,%d,%v", cols, rows, ok)
+	}
+
+	term, ok := parsePtyTerm(payload)
+	if !ok || term != "xterm" {
+		t.Errorf("parsePtyTerm = %q,%v", term, ok)
+	}
+}
+
+func TestDetectColorTier(t *testing.T) {
+	cases := map[string]colorTier{
+		"":                colorTierNone,
+		"dumb":            colorTierNone,
+		"vt100":           colorTierNone,
+		"linux":           colorTierNone,
+		"xterm":           colorTierTrueColor,
+		"xterm-256color":  colorTier256,
+		"screen-256color": colorTier256,
+		"tmux-256color":   colorTier256,
+		"xterm-direct":    colorTierTrueColor,
+		"xterm-kitty":     colorTierTrueColor,
+	}
+	for term, want := range cases {
+		if got := detectColorTier(term); got != want {
+			t.Errorf("detectColorTier(%q) = %d, want %d", term, got, want)
+		}
+	}
+}
+
+func TestQuantize256(t *testing.T) {
+	if got := quantize256(0, 0, 0); got != 16 {
+		t.Errorf("black = %d, want 16", got)
+	}
+	if got := quantize256(255, 255, 255); got != 231 {
+		t.Errorf("white = %d, want 231", got)
 	}
 }

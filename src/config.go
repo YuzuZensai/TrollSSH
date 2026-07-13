@@ -32,6 +32,7 @@ type Config struct {
 	BrightnessThreshold int
 	Charset             string
 	Invert              bool
+	ForceGrayscale      bool
 	LogCredentials      bool
 }
 
@@ -129,6 +130,7 @@ func loadConfig() Config {
 		BrightnessThreshold: envInt("BRIGHTNESS_THRESHOLD", 40, 0, 100),
 		Charset:             envString("CHARSET", "detailed"),
 		Invert:              envBool("INVERT", false),
+		ForceGrayscale:      envBool("FORCE_GRAYSCALE", false),
 		LogCredentials:      envBool("LOG_CREDENTIALS", false),
 	}
 }

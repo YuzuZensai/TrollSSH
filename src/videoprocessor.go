@@ -72,6 +72,61 @@ func parseFrameRate(rate string) float64 {
 	return num
 }
 
+func extractFrames(path, vf, label string, maxDimension, totalFrames int) ([][]byte, error) {
+	cmd := exec.Command(
+		"ffmpeg", "-i", path,
+		"-c:v", "mjpeg",
+		"-q:v", "3",
+		"-vf", vf,
+		"-f", "image2pipe",
+		"pipe:1",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg failed: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ffmpeg failed: %w", err)
+	}
+
+	var frames [][]byte
+	splitter := &jpegFrameSplitter{}
+	reportProgress := func(count int) {
+		if totalFrames > 0 {
+			pct := min(100, int(math.Round(float64(count)/float64(totalFrames)*100)))
+			fmt.Printf("\rGenerating %s frames: %d/%d (%d%%)", label, count, totalFrames, pct)
+		} else {
+			fmt.Printf("\rGenerating %s frames: %d", label, count)
+		}
+	}
+
+	buf := make([]byte, 256*1024)
+	for {
+		n, err := stdout.Read(buf)
+		if n > 0 {
+			frames = append(frames, splitter.push(buf[:n])...)
+			reportProgress(len(frames))
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			cmd.Wait()
+			return nil, fmt.Errorf("ffmpeg stream error: %s", err.Error())
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("ffmpeg failed: %s", strings.TrimSpace(stderr.String()))
+	}
+	if len(frames) == 0 {
+		return nil, fmt.Errorf("no frames were decoded from the video")
+	}
+	fmt.Println()
+	return frames, nil
+}
+
 func processVideo(path, output string, maxDimension int) error {
 	probeCmd := exec.Command(
 		"ffprobe", "-v", "error",
@@ -115,65 +170,20 @@ func processVideo(path, output string, maxDimension int) error {
 		}
 	}
 
-	vf := fmt.Sprintf(
-		"format=gray,scale=w=%d:h=%d:force_original_aspect_ratio=decrease",
+	scaleFilter := fmt.Sprintf(
+		"scale=w=%d:h=%d:force_original_aspect_ratio=decrease",
 		maxDimension, maxDimension,
 	)
-	cmd := exec.Command(
-		"ffmpeg", "-i", path,
-		"-c:v", "mjpeg",
-		"-q:v", "3",
-		"-vf", vf,
-		"-f", "image2pipe",
-		"pipe:1",
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdout, err := cmd.StdoutPipe()
+
+	colorFrames, err := extractFrames(path, scaleFilter, "color", maxDimension, totalFrames)
 	if err != nil {
-		return fmt.Errorf("ffmpeg failed: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("ffmpeg failed: %w", err)
+		return err
 	}
 
-	videoData := FramesContainer{FPS: fps}
-	splitter := &jpegFrameSplitter{}
-	reportProgress := func(count int) {
-		if totalFrames > 0 {
-			pct := min(100, int(math.Round(float64(count)/float64(totalFrames)*100)))
-			fmt.Printf("\rGenerating frames: %d/%d (%d%%)", count, totalFrames, pct)
-		} else {
-			fmt.Printf("\rGenerating frames: %d", count)
-		}
-	}
-
-	buf := make([]byte, 256*1024)
-	for {
-		n, err := stdout.Read(buf)
-		if n > 0 {
-			videoData.Frames = append(videoData.Frames, splitter.push(buf[:n])...)
-			reportProgress(len(videoData.Frames))
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			cmd.Wait()
-			return fmt.Errorf("ffmpeg stream error: %s", err.Error())
-		}
-	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg failed: %s", strings.TrimSpace(stderr.String()))
-	}
-	if len(videoData.Frames) == 0 {
-		return fmt.Errorf("no frames were decoded from the video")
-	}
-
-	fmt.Println()
+	videoData := FramesContainer{FPS: fps, ColorFrames: colorFrames}
 	if err := writeTSF(output, &videoData); err != nil {
 		return err
 	}
-	logInfo(fmt.Sprintf("Saved %d frames to %s", len(videoData.Frames), output))
+	logInfo(fmt.Sprintf("Saved %d frames to %s", len(videoData.ColorFrames), output))
 	return nil
 }

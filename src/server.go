@@ -102,7 +102,7 @@ func createServer(deps ServerDeps) *Server {
 	for i, data := range deps.VideoSets {
 		sets[i] = frameSet{
 			data: data,
-			renderer: newFrameRenderer(data.Frames, asciiOptions{
+			renderer: newFrameRenderer(data.ColorFrames, asciiOptions{
 				brightnessThreshold: config.BrightnessThreshold,
 				charset:             config.Charset,
 				invert:              config.Invert,
@@ -277,6 +277,18 @@ func parseDims(payload []byte) (cols, rows int, ok bool) {
 	return cols, rows, true
 }
 
+// parsePtyTerm extracts the TERM string prefixing a pty-req payload.
+func parsePtyTerm(payload []byte) (term string, ok bool) {
+	if len(payload) < 4 {
+		return "", false
+	}
+	strLen := binary.BigEndian.Uint32(payload)
+	if int(strLen)+16 > len(payload) {
+		return "", false
+	}
+	return string(payload[4 : 4+strLen]), true
+}
+
 func (s *Server) handleSession(
 	sshConn *ssh.ServerConn,
 	channel ssh.Channel,
@@ -286,6 +298,10 @@ func (s *Server) handleSession(
 ) {
 	size := &termSize{}
 	size.set(80, 24, s.config.MaxDimension)
+	tier := colorTierTrueColor
+	if s.config.ForceGrayscale {
+		tier = colorTierNone
+	}
 
 	started := false
 	for req := range requests {
@@ -294,6 +310,13 @@ func (s *Server) handleSession(
 			logDebug("Opening pty for session", ip)
 			if cols, rows, ok := parseDims(req.Payload); ok {
 				size.set(cols, rows, s.config.MaxDimension)
+			}
+			if term, ok := parsePtyTerm(req.Payload); ok {
+				tier = detectColorTier(term)
+				if s.config.ForceGrayscale {
+					tier = colorTierNone
+				}
+				logDebug(fmt.Sprintf("Client %s TERM=%q -> color tier %d", ip, sanitizeN(term, 64), tier))
 			}
 			req.Reply(true, nil)
 		case "window-change":
@@ -317,14 +340,14 @@ func (s *Server) handleSession(
 			req.Reply(true, nil)
 			if !started {
 				started = true
-				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false)
+				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
 			}
 		case "shell":
 			logDebug("Opening shell for session", ip)
 			req.Reply(true, nil)
 			if !started {
 				started = true
-				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false)
+				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
 			}
 		default:
 			if req.WantReply {
@@ -352,6 +375,7 @@ func (s *Server) playVideo(
 	ip string,
 	setIndex int,
 	keepAspectRatio bool,
+	tier colorTier,
 ) {
 	config := s.config
 	current := s.sets[setIndex]
@@ -438,7 +462,7 @@ func (s *Server) playVideo(
 
 		case <-ticker.C:
 			w, h := size.get()
-			ascii, err := current.renderer.render(currentFrame, w, h, keepAspectRatio)
+			ascii, err := current.renderer.render(currentFrame, w, h, keepAspectRatio, tier)
 			if err != nil {
 				logError("Render error for", ip, sanitize(err.Error()))
 				sshConn.Close()
@@ -451,7 +475,7 @@ func (s *Server) playVideo(
 			}
 
 			currentFrame++
-			if currentFrame < len(current.data.Frames) {
+			if currentFrame < len(current.data.ColorFrames) {
 				continue
 			}
 
