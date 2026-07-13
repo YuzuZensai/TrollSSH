@@ -13,7 +13,14 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const clearScreen = "\x1b[2J\x1b[0f"
+const (
+	clearScreen = "\x1b[2J\x1b[0f"
+	hideCursor  = "\x1b[?25l"
+	showCursor  = "\x1b[?25h"
+	syncStart   = "\x1b[?2026h"
+	syncEnd     = "\x1b[?2026l"
+	homeCursor  = "\x1b[H"
+)
 
 type ConnectionTracker struct {
 	mu     sync.Mutex
@@ -383,6 +390,8 @@ func (s *Server) playVideo(
 	w, h := size.get()
 	logDebug(fmt.Sprintf("Terminal size %dx%d for %s", w, h, ip))
 
+	defer func() { _, _ = channel.Write([]byte(showCursor)) }()
+
 	if s.fakeLogin != nil {
 		_, _ = channel.Write([]byte(clearScreen))
 		_, _ = channel.Write([]byte(*s.fakeLogin))
@@ -435,6 +444,8 @@ func (s *Server) playVideo(
 		return
 	}
 
+	_, _ = channel.Write([]byte(hideCursor))
+
 	frameInterval := func() time.Duration {
 		return time.Duration(float64(time.Second) / current.data.FPS)
 	}
@@ -444,6 +455,7 @@ func (s *Server) playVideo(
 
 	currentFrame := 0
 	loopCount := 0
+	lastW, lastH := 0, 0
 
 	for {
 		select {
@@ -457,6 +469,7 @@ func (s *Server) playVideo(
 			setIndex = (setIndex + delta + len(s.sets)) % len(s.sets)
 			current = s.sets[setIndex]
 			currentFrame = 0
+			lastW, lastH = 0, 0
 			logDebug(fmt.Sprintf("%s switched to %q", ip, current.data.Name))
 			ticker.Reset(frameInterval())
 
@@ -469,7 +482,12 @@ func (s *Server) playVideo(
 				return
 			}
 
-			if _, err := channel.Write([]byte(clearScreen + ascii)); err != nil {
+			prefix := homeCursor
+			if w != lastW || h != lastH {
+				prefix = clearScreen
+				lastW, lastH = w, h
+			}
+			if _, err := channel.Write([]byte(syncStart + prefix + ascii + syncEnd)); err != nil {
 				closeSession()
 				return
 			}
@@ -482,7 +500,7 @@ func (s *Server) playVideo(
 			currentFrame = 0
 			loopCount++
 			if config.MaxLoop > 0 && loopCount >= config.MaxLoop {
-				_, _ = channel.Write([]byte(clearScreen))
+				_, _ = channel.Write([]byte(showCursor + clearScreen))
 				if s.goodbye != nil {
 					_, _ = channel.Write([]byte(*s.goodbye))
 				}
