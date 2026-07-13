@@ -31,6 +31,11 @@ jobs:
               with:
                   install-go: false
 
+            - name: golangci-lint
+              uses: golangci/golangci-lint-action@v7
+              with:
+                  working-directory: src
+
             - name: Build
               run: go build -o trollssh ./src
 
