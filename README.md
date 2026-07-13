@@ -25,7 +25,7 @@ Generate a frame set from a video through container image
 
 ```sh
 docker run --rm -v ./video.mp4:/home/app/video.mp4 -v ./frames:/home/app/frames \
-    ghcr.io/yuzuzensai/trollssh:latest trollssh --generate --video video.mp4
+    ghcr.io/yuzuzensai/trollssh:v1.0.0 trollssh --generate --video video.mp4
 ```
 
 This writes `frames/<name>.tsf`, a simple container of color JPEG frames plus

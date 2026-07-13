@@ -1,6 +1,6 @@
 services:
     trollssh:
-        image: ghcr.io/yuzuzensai/trollssh:latest
+        image: ghcr.io/yuzuzensai/trollssh:v1.0.0
         container_name: trollssh
         restart: unless-stopped
         ports:
