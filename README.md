@@ -86,6 +86,22 @@ go build -o trollssh ./src
 ./trollssh
 ```
 
+CI runs the following checks on every push:
+
+```sh
+gofmt -l ./src                    # format
+go vet ./src/...                  # vet
+golangci-lint run ./src/...       # lint, see https://golangci-lint.run
+go test ./src/...                 # tests
+```
+
+To run them automatically before each commit, install
+[lefthook](https://github.com/evilmartians/lefthook) and `golangci-lint`, then:
+
+```sh
+lefthook install
+```
+
 ## License
 
-See [LICENSE](LICENSE)
+[MIT](LICENSE)
