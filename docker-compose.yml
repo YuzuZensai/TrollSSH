@@ -9,6 +9,6 @@ services:
             - .env
         volumes:
             # Host keys + banner/fakelogin/goodbye text assets (persisted).
-            - ./data:/home/bun/app/data
+            - ./data:/home/app/data
             # Pre-generated frame sets
-            - ./frames:/home/bun/app/frames
+            - ./frames:/home/app/frames

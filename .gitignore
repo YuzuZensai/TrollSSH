@@ -139,3 +139,7 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+# Go build output
+/TrollSSH
+TrollSSH
+*.exe

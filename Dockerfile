@@ -1,14 +1,15 @@
-FROM oven/bun:1.2-slim
-WORKDIR /home/bun/app
-
-RUN apt-get update -y && \
-    apt-get install -y ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile --production
-
-COPY tsconfig.json ./
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY src ./src
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /trollssh ./src
 
-CMD ["bun", "src/index.ts"]
+FROM alpine:3.22
+WORKDIR /home/app
+
+RUN apk add --no-cache ffmpeg
+
+COPY --from=build /trollssh /usr/local/bin/trollssh
+
+CMD ["trollssh"]

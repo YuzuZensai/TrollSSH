@@ -12,33 +12,30 @@ permissions:
 
 jobs:
     test:
-        runs-on: ${{ matrix.os }}
-        strategy:
-            fail-fast: false
-            matrix:
-                os: [ubuntu-latest]
-                bun-version: ["1.2"]
+        runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
 
-            - uses: oven-sh/setup-bun@v2
+            - uses: actions/setup-go@v5
               with:
-                  bun-version: ${{ matrix.bun-version }}
-
-            - name: Install dependencies
-              run: bun install --frozen-lockfile
-
-            - name: Typecheck
-              run: bun run typecheck
-
-            - name: Lint
-              run: bun run lint
+                  go-version-file: go.mod
 
             - name: Format check
-              run: bun run format
+              run: test -z "$(gofmt -l src)"
+
+            - name: Vet
+              run: go vet ./src/
+
+            - name: Staticcheck
+              uses: dominikh/staticcheck-action@v1
+              with:
+                  install-go: false
+
+            - name: Build
+              run: go build -o trollssh ./src
 
             - name: Unit tests
-              run: bun test
+              run: go test -race ./src/
 
     docker:
         needs: test
@@ -47,16 +44,6 @@ jobs:
             - uses: actions/checkout@v4
 
             - uses: docker/setup-buildx-action@v3
-
-            - name: Build image
-              uses: docker/build-push-action@v6
-              with:
-                  context: .
-                  push: false
-                  load: true
-                  tags: trollssh:ci
-                  cache-from: type=gha
-                  cache-to: type=gha,mode=max
 
             - name: Determine push conditions
               id: should_push
@@ -67,15 +54,15 @@ jobs:
                     echo "push=false" >> "$GITHUB_OUTPUT"
                   fi
 
-            - name: Determine image tag
-              if: steps.should_push.outputs.push == 'true'
-              id: tag
-              run: |
-                  if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-                    echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-                  else
-                    echo "tag=latest" >> "$GITHUB_OUTPUT"
-                  fi
+            - name: Docker metadata
+              id: meta
+              uses: docker/metadata-action@v5
+              with:
+                  images: ghcr.io/yuzuzensai/trollssh
+                  tags: |
+                      type=raw,value=latest,enable={{is_default_branch}}
+                      type=semver,pattern=v{{version}}
+                      type=sha,prefix=sha-,format=short
 
             - name: Log in to GHCR
               if: steps.should_push.outputs.push == 'true'
@@ -85,12 +72,13 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Push image
-              if: steps.should_push.outputs.push == 'true'
+            - name: Build (and push) image
               uses: docker/build-push-action@v6
               with:
                   context: .
-                  push: true
-                  tags: ghcr.io/yuzuzensai/trollssh:${{ steps.tag.outputs.tag }}
+                  push: ${{ steps.should_push.outputs.push == 'true' }}
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
                   cache-from: type=gha
                   cache-to: type=gha,mode=max
+                  provenance: false
