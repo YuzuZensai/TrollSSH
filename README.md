@@ -5,7 +5,7 @@ ASCII/Unicode art at whoever connects to it
 
 ![SSH Demo](assets/ssh.webp)
 
-# Features
+## Features
 
 - **Accept any credentials**
 - **Colored ASCII/Unicode video playback** - resized live to the client's
