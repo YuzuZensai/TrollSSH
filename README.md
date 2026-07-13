@@ -1,4 +1,4 @@
-# 💀 TrollSSH
+# 👻 TrollSSH
 
 A fake SSH server that accepts any login and plays ASCII video at whoever
 connects to it
