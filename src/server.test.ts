@@ -44,4 +44,28 @@ describe("ConnectionTracker", () => {
         expect(tracker.count("1.1.1.1")).toBe(1);
         expect(tracker.count("2.2.2.2")).toBe(2);
     });
+
+    test("totalCount aggregates connections across all IPs", () => {
+        const tracker = new ConnectionTracker();
+        tracker.increment("1.1.1.1");
+        tracker.increment("2.2.2.2");
+        expect(tracker.totalCount()).toBe(2);
+        tracker.decrement("1.1.1.1");
+        expect(tracker.totalCount()).toBe(1);
+    });
+
+    test("hasReachedTotalLimit reflects the global total", () => {
+        const tracker = new ConnectionTracker();
+        tracker.increment("1.1.1.1");
+        tracker.increment("2.2.2.2");
+        expect(tracker.hasReachedTotalLimit(2)).toBe(true);
+        expect(tracker.hasReachedTotalLimit(3)).toBe(false);
+    });
+
+    test("decrementing an unknown IP does not affect the total", () => {
+        const tracker = new ConnectionTracker();
+        tracker.increment("1.1.1.1");
+        tracker.decrement("9.9.9.9");
+        expect(tracker.totalCount()).toBe(1);
+    });
 });
