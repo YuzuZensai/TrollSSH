@@ -1,0 +1,96 @@
+name: CI
+
+on:
+    push:
+        branches: ["**"]
+        tags: ["v*"]
+    pull_request:
+
+permissions:
+    contents: read
+    packages: write
+
+jobs:
+    test:
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest]
+                bun-version: [latest, "1.1"]
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: ${{ matrix.bun-version }}
+
+            - name: Install dependencies
+              run: bun install --frozen-lockfile
+
+            - name: Typecheck
+              run: bun run typecheck
+
+            - name: Lint
+              run: bun run lint
+
+            - name: Format check
+              run: bun run format
+
+            - name: Unit tests
+              run: bun test
+
+    docker:
+        needs: test
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: docker/setup-buildx-action@v3
+
+            - name: Build image
+              uses: docker/build-push-action@v6
+              with:
+                  context: .
+                  push: false
+                  load: true
+                  tags: trollssh:ci
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Determine push conditions
+              id: should_push
+              run: |
+                  if [[ "${{ github.event_name }}" == "push" && ( "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == refs/tags/v* ) ]]; then
+                    echo "push=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "push=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Determine image tag
+              if: steps.should_push.outputs.push == 'true'
+              id: tag
+              run: |
+                  if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+                    echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "tag=latest" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Log in to GHCR
+              if: steps.should_push.outputs.push == 'true'
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Push image
+              if: steps.should_push.outputs.push == 'true'
+              uses: docker/build-push-action@v6
+              with:
+                  context: .
+                  push: true
+                  tags: ghcr.io/yuzuzensai/trollssh:${{ steps.tag.outputs.tag }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max

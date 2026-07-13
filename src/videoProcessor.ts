@@ -1,20 +1,19 @@
 import ffmpeg from "fluent-ffmpeg";
 import fs from "fs";
-
-export interface FramesContainer {
-    frames: Buffer[];
-    fps: number;
-}
+import { FramesContainer } from "./frames";
 
 export async function process(path: string, output: string): Promise<void> {
     return new Promise((resolve, reject) => {
         ffmpeg(path).ffprobe((err, data) => {
             if (err) {
-                throw new Error("An error occurred: " + err.message);
+                reject(new Error("An error occurred: " + err.message));
+                return;
             }
 
-            if (!data.streams[0].r_frame_rate)
-                throw new Error("Unable to get video fps");
+            if (!data.streams[0].r_frame_rate) {
+                reject(new Error("Unable to get video fps"));
+                return;
+            }
 
             const videoData: FramesContainer = {
                 frames: [],
@@ -29,7 +28,7 @@ export async function process(path: string, output: string): Promise<void> {
                 });
 
             const ffstream = ffvideo.pipe();
-            ffstream.on("data", (chunk) => {
+            ffstream.on("data", (chunk: Buffer) => {
                 videoData.frames.push(chunk);
             });
 
@@ -43,5 +42,5 @@ export async function process(path: string, output: string): Promise<void> {
 }
 
 export default {
-    process
+    process,
 };

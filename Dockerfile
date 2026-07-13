@@ -1,24 +1,23 @@
-FROM node:18 as build
-WORKDIR /home/node/app
+FROM oven/bun:1 AS build
+WORKDIR /home/bun/app
 
-COPY . .
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
 
-RUN apt-get update -y
-RUN apt-get install -y ffmpeg
+COPY tsconfig.json ./
+COPY src ./src
+RUN bun run build
 
-RUN yarn
-RUN yarn build
+FROM oven/bun:1-slim
+WORKDIR /home/bun/app
 
-FROM node:18
-WORKDIR /home/node/app
+RUN apt-get update -y && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update -y
-RUN apt-get install -y ffmpeg
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
 
-COPY --from=build /home/node/app/package.json .
-COPY --from=build /home/node/app/yarn.lock .
+COPY --from=build /home/bun/app/dist ./dist
 
-RUN yarn
-
-COPY --from=build /home/node/app/dist .
-CMD ["node", "index.js"]
+CMD ["bun", "dist/index.js"]

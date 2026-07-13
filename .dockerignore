@@ -8,6 +8,7 @@ docker-compose.yml
 node_modules
 .env
 dist
+docs
 
 config
 .vscode
