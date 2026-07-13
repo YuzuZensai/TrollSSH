@@ -48,7 +48,7 @@ func writeTSF(output string, data *FramesContainer) error {
 }
 
 func loadTSF(filename string) (*FramesContainer, error) {
-	raw, err := os.ReadFile(filename)
+	raw, err := readFrameFile(filename)
 	if err != nil {
 		return nil, err
 	}

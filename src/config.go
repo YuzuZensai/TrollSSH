@@ -28,7 +28,7 @@ type Config struct {
 	MaxAuthAttempts     int
 	HandshakeTimeout    time.Duration
 	MaxDimension        int
-	FrameResolution     int
+	RenderCacheMB       int
 	BrightnessThreshold int
 	Charset             string
 	Invert              bool
@@ -126,7 +126,7 @@ func loadConfig() Config {
 		MaxAuthAttempts:     envInt("MAX_AUTH_ATTEMPTS", 6, 1, maxInt),
 		HandshakeTimeout:    envDurationMs("HANDSHAKE_TIMEOUT", 10*time.Second),
 		MaxDimension:        envInt("MAX_DIMENSION", 512, 1, 4096),
-		FrameResolution:     envInt("FRAME_RESOLUTION", 360, 16, 1080),
+		RenderCacheMB:       envInt("RENDER_CACHE_MB", 256, 0, maxInt),
 		BrightnessThreshold: envInt("BRIGHTNESS_THRESHOLD", 40, 0, 100),
 		Charset:             envString("CHARSET", "detailed"),
 		Invert:              envBool("INVERT", false),

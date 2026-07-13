@@ -105,15 +105,16 @@ func clampDimension(value, max int) int {
 func createServer(deps ServerDeps) *Server {
 	config := deps.Config
 
+	cache := newRenderCache(int64(config.RenderCacheMB) << 20)
 	sets := make([]frameSet, len(deps.VideoSets))
 	for i, data := range deps.VideoSets {
 		sets[i] = frameSet{
 			data: data,
-			renderer: newFrameRenderer(data.ColorFrames, asciiOptions{
+			renderer: newFrameRenderer(i, data.ColorFrames, asciiOptions{
 				brightnessThreshold: config.BrightnessThreshold,
 				charset:             config.Charset,
 				invert:              config.Invert,
-			}),
+			}, cache),
 		}
 	}
 

@@ -25,7 +25,7 @@ Generate a frame set from a video through container image
 
 ```sh
 docker run --rm -v ./video.mp4:/home/app/video.mp4 -v ./frames:/home/app/frames \
-    ghcr.io/yuzuzensai/trollssh:v1.0.1 trollssh --generate --video video.mp4
+    ghcr.io/yuzuzensai/trollssh:v1.0.1 trollssh --generate --video video.mp4 --resolution 512
 ```
 
 This writes `frames/<name>.tsf`, a simple container of color JPEG frames plus
@@ -51,13 +51,20 @@ ssh anyone@localhost
 
 ## Configuration
 
-Configuration is via environment variables, loaded from a `.env` file if one
-exists (see [`.env.example`](.env.example) for the full annotated list).
-Durations are in milliseconds.
+Server configuration is via environment variables, loaded from a `.env` file
+if one exists (see [`.env.example`](.env.example) for the full annotated
+list). Durations are in milliseconds.
 
 Host keys (`data/id_rsa`, `data/id_ed25519`) are generated on first run and
 reused afterwards.
 
+Frame generation is configured with flags:
+
+| Flag                 | Default | Description                                        |
+| -------------------- | ------- | -------------------------------------------------- |
+| `--generate`, `-g`   |         | Generate a `.tsf` frame set instead of serving     |
+| `--video`, `-v`      |         | Source video path                                  |
+| `--resolution`, `-r` | `512`   | Stored frame max dimension in pixels. Higher = sharper but bigger `.tsf` files and slower rendering |
 
 ## Customization
 
@@ -75,7 +82,7 @@ Requirements: Go 1.25+ and `ffmpeg` / `ffprobe` on `PATH` (only for
 `--generate`).
 
 ```sh
-go run ./src --generate --video video.mp4
+go run ./src --generate --video video.mp4 --resolution 512
 go run ./src
 ```
 

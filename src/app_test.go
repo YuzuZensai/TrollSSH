@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,7 +169,7 @@ func TestFrameToAscii(t *testing.T) {
 	// Below threshold -> first ramp char; full brightness -> last.
 	opts := asciiOptions{brightnessThreshold: 40, charset: "standard"}
 	ramp := []rune(resolveCharset("standard"))
-	out := []rune(frameToAscii([]byte{0, 255}, opts))
+	out := []rune(frameToAscii([]byte{0, 255}, ramp, opts))
 	if out[0] != ramp[0] {
 		t.Errorf("dark px = %q, want %q", out[0], ramp[0])
 	}
@@ -180,9 +181,48 @@ func TestFrameToAscii(t *testing.T) {
 func TestFrameToAsciiInvert(t *testing.T) {
 	opts := asciiOptions{brightnessThreshold: 40, charset: "standard", invert: true}
 	ramp := []rune(resolveCharset("standard"))
-	out := []rune(frameToAscii([]byte{255}, opts))
+	out := []rune(frameToAscii([]byte{255}, ramp, opts))
 	if out[0] != ramp[0] {
 		t.Errorf("inverted bright = %q, want %q", out[0], ramp[0])
+	}
+}
+
+func TestRenderCacheEvictsByBytes(t *testing.T) {
+	budget := 3 * entryCost("k", strings.Repeat("x", 1000))
+	c := newRenderCache(budget)
+	for i := range 5 {
+		c.put(fmt.Sprintf("%d", i), strings.Repeat("x", 1000))
+	}
+	if c.size > budget {
+		t.Errorf("size %d exceeds budget %d", c.size, budget)
+	}
+	if _, ok := c.get("0"); ok {
+		t.Error("oldest entry should have been evicted")
+	}
+	if _, ok := c.get("4"); !ok {
+		t.Error("newest entry should be cached")
+	}
+}
+
+func TestRenderCacheDisabled(t *testing.T) {
+	c := newRenderCache(0)
+	if c != nil {
+		t.Fatal("zero budget should disable the cache")
+	}
+	c.put("k", "v")
+	if _, ok := c.get("k"); ok {
+		t.Error("nil cache should never hit")
+	}
+}
+
+func TestRenderCacheRejectsOversizedEntry(t *testing.T) {
+	c := newRenderCache(256)
+	c.put("big", strings.Repeat("x", 10_000))
+	if _, ok := c.get("big"); ok {
+		t.Error("entry larger than budget should not be cached")
+	}
+	if c.size != 0 {
+		t.Errorf("size = %d, want 0", c.size)
 	}
 }
 

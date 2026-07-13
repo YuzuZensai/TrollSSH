@@ -6,7 +6,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,12 +18,13 @@ import (
 )
 
 type cliArgs struct {
-	generate bool
-	video    string
+	generate   bool
+	video      string
+	resolution int
 }
 
 func parseArgs(argv []string) cliArgs {
-	var args cliArgs
+	args := cliArgs{resolution: 512}
 	for i := 0; i < len(argv); i++ {
 		switch argv[i] {
 		case "--generate", "-g":
@@ -30,6 +33,13 @@ func parseArgs(argv []string) cliArgs {
 			if i+1 < len(argv) {
 				i++
 				args.video = argv[i]
+			}
+		case "--resolution", "-r":
+			if i+1 < len(argv) {
+				i++
+				if n, err := strconv.Atoi(argv[i]); err == nil {
+					args.resolution = max(n, 16)
+				}
 			}
 		}
 	}
@@ -52,7 +62,7 @@ func resolveVideoPath(explicitPath string) string {
 	return ""
 }
 
-func generateFrames(config Config, framesDir, videoArg string) {
+func generateFrames(framesDir, videoArg string, resolution int) {
 	if videoArg == "" {
 		fail("No source video given. Pass --video <path>.")
 	}
@@ -68,7 +78,7 @@ func generateFrames(config Config, framesDir, videoArg string) {
 	output := filepath.Join(framesDir, base+".tsf")
 
 	logInfo(fmt.Sprintf("Generating frames from %q -> %s", videoPath, output))
-	if err := processVideo(videoPath, output, config.FrameResolution); err != nil {
+	if err := processVideo(videoPath, output, resolution); err != nil {
 		fail(fmt.Sprintf("Failed to generate frames from %q: %s", videoPath, err.Error()))
 	}
 }
@@ -143,9 +153,33 @@ func loadAllFrames(framesDir string) []*FramesContainer {
 	return results
 }
 
+func applyMemoryLimit() {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return
+	}
+	for _, path := range []string{
+		"/sys/fs/cgroup/memory.max",
+		"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		if err != nil || n <= 0 || n > 1<<48 {
+			return
+		}
+		limit := n * 9 / 10
+		debug.SetMemoryLimit(limit)
+		logInfo(fmt.Sprintf("Memory limit set to %d MB (90%% of cgroup limit)", limit>>20))
+		return
+	}
+}
+
 func main() {
 	_ = godotenv.Load()
 	logThreshold = resolveThreshold()
+	applyMemoryLimit()
 
 	config := loadConfig()
 	args := parseArgs(os.Args[1:])
@@ -158,7 +192,7 @@ func main() {
 	framesDir := filepath.Join(cwd, "frames")
 
 	if args.generate {
-		generateFrames(config, framesDir, args.video)
+		generateFrames(framesDir, args.video, args.resolution)
 		return
 	}
 

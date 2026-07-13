@@ -7,8 +7,10 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"golang.org/x/image/draw"
 )
@@ -62,18 +64,49 @@ func resolveCharset(charset string) string {
 	return charset
 }
 
-func resizeFrame(frame []byte, width, height int, keepAspectRatio bool, tier colorTier) (draw.Image, error) {
+var pixPool sync.Pool
+
+func getPixBuf(n int) []byte {
+	if v := pixPool.Get(); v != nil {
+		if b := *v.(*[]byte); cap(b) >= n {
+			return b[:n]
+		}
+	}
+	return make([]byte, n)
+}
+
+func putPixBuf(b []byte) {
+	pixPool.Put(&b)
+}
+
+var outPool sync.Pool
+
+func getOutBuf(capacity int) []byte {
+	if v := outPool.Get(); v != nil {
+		if b := *v.(*[]byte); cap(b) >= capacity {
+			return b[:0]
+		}
+	}
+	return make([]byte, 0, capacity)
+}
+
+func putOutBuf(b []byte) {
+	outPool.Put(&b)
+}
+
+func resizeFrame(frame, pix []byte, width, height int, keepAspectRatio bool, tier colorTier) (draw.Image, error) {
 	src, err := jpeg.Decode(bytes.NewReader(frame))
 	if err != nil {
 		return nil, err
 	}
+	rect := image.Rect(0, 0, width, height)
 	var dst draw.Image
 	var bg color.Color
 	if tier == colorTierNone {
-		dst = image.NewGray(image.Rect(0, 0, width, height))
+		dst = &image.Gray{Pix: pix[:width*height], Stride: width, Rect: rect}
 		bg = color.Gray{0}
 	} else {
-		dst = image.NewNRGBA(image.Rect(0, 0, width, height))
+		dst = &image.NRGBA{Pix: pix[:4*width*height], Stride: 4 * width, Rect: rect}
 		bg = color.Black
 	}
 	if keepAspectRatio {
@@ -114,16 +147,17 @@ func rampIndex(brightness, threshold, total int, invert bool) int {
 	return index
 }
 
-func frameToAscii(pixels []byte, options asciiOptions) string {
-	ramp := []rune(resolveCharset(options.charset))
+func frameToAscii(pixels []byte, ramp []rune, options asciiOptions) string {
 	total := len(ramp)
-	var b strings.Builder
+	buf := getOutBuf(len(pixels) * 4)
 	for _, p := range pixels {
 		brightness := int(p) * 100 / 255
 		index := rampIndex(brightness, options.brightnessThreshold, total, options.invert)
-		b.WriteRune(ramp[index])
+		buf = utf8.AppendRune(buf, ramp[index])
 	}
-	return b.String()
+	ascii := string(buf)
+	putOutBuf(buf)
+	return ascii
 }
 
 const ansiReset = "\x1b[0m"
@@ -147,11 +181,25 @@ func quantize256(r, g, b uint8) int {
 	return 16 + 36*toLevel(r) + 6*toLevel(g) + toLevel(b)
 }
 
-func frameToAnsi(img *image.NRGBA, options asciiOptions, tier colorTier) string {
-	ramp := []rune(resolveCharset(options.charset))
+func appendColor(buf []byte, r, g, b uint8, tier colorTier) []byte {
+	if tier == colorTierTrueColor {
+		buf = append(buf, "\x1b[38;2;"...)
+		buf = strconv.AppendUint(buf, uint64(r), 10)
+		buf = append(buf, ';')
+		buf = strconv.AppendUint(buf, uint64(g), 10)
+		buf = append(buf, ';')
+		buf = strconv.AppendUint(buf, uint64(b), 10)
+	} else {
+		buf = append(buf, "\x1b[38;5;"...)
+		buf = strconv.AppendUint(buf, uint64(quantize256(r, g, b)), 10)
+	}
+	return append(buf, 'm')
+}
+
+func frameToAnsi(img *image.NRGBA, ramp []rune, options asciiOptions, tier colorTier) string {
 	total := len(ramp)
 	bounds := img.Bounds()
-	var b strings.Builder
+	buf := getOutBuf(bounds.Dx() * bounds.Dy() * 16)
 	var lastR, lastG, lastB uint8
 	first := true
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -161,33 +209,29 @@ func frameToAnsi(img *image.NRGBA, options asciiOptions, tier colorTier) string 
 			brightness := (int(r)*299 + int(g)*587 + int(bl)*114) / 255 / 10
 			index := rampIndex(brightness, options.brightnessThreshold, total, options.invert)
 			if first || r != lastR || g != lastG || bl != lastB {
-				if tier == colorTierTrueColor {
-					fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm", r, g, bl)
-				} else {
-					fmt.Fprintf(&b, "\x1b[38;5;%dm", quantize256(r, g, bl))
-				}
+				buf = appendColor(buf, r, g, bl, tier)
 				lastR, lastG, lastB = r, g, bl
 				first = false
 			}
-			b.WriteRune(ramp[index])
+			buf = utf8.AppendRune(buf, ramp[index])
 		}
 		if y < bounds.Max.Y-1 {
-			b.WriteString(ansiReset + "\r\n")
+			buf = append(buf, ansiReset+"\r\n"...)
 			first = true
 		}
 	}
-	b.WriteString(ansiReset)
-	return b.String()
+	buf = append(buf, ansiReset...)
+	ascii := string(buf)
+	putOutBuf(buf)
+	return ascii
 }
 
-type FrameRenderer struct {
-	colorFrames [][]byte
-	options     asciiOptions
-	maxEntries  int
-
-	mu    sync.Mutex
-	cache map[string]*list.Element
-	order *list.List
+type renderCache struct {
+	mu       sync.Mutex
+	maxBytes int64
+	size     int64
+	entries  map[string]*list.Element
+	order    *list.List
 }
 
 type cacheEntry struct {
@@ -195,52 +239,101 @@ type cacheEntry struct {
 	ascii string
 }
 
-func newFrameRenderer(colorFrames [][]byte, options asciiOptions) *FrameRenderer {
+func entryCost(key, ascii string) int64 {
+	return int64(len(key)+len(ascii)) + 128
+}
+
+func newRenderCache(maxBytes int64) *renderCache {
+	if maxBytes <= 0 {
+		return nil
+	}
+	return &renderCache{
+		maxBytes: maxBytes,
+		entries:  make(map[string]*list.Element),
+		order:    list.New(),
+	}
+}
+
+func (c *renderCache) get(key string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.entries[key]
+	if !ok {
+		return "", false
+	}
+	c.order.MoveToBack(el)
+	return el.Value.(*cacheEntry).ascii, true
+}
+
+func (c *renderCache) put(key, ascii string) {
+	if c == nil {
+		return
+	}
+	cost := entryCost(key, ascii)
+	if cost > c.maxBytes {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.entries[key]; ok {
+		return
+	}
+	c.entries[key] = c.order.PushBack(&cacheEntry{key, ascii})
+	c.size += cost
+	for c.size > c.maxBytes {
+		oldest := c.order.Front()
+		c.order.Remove(oldest)
+		evicted := oldest.Value.(*cacheEntry)
+		delete(c.entries, evicted.key)
+		c.size -= entryCost(evicted.key, evicted.ascii)
+	}
+}
+
+type FrameRenderer struct {
+	setID       int
+	colorFrames [][]byte
+	options     asciiOptions
+	ramp        []rune
+	cache       *renderCache
+}
+
+func newFrameRenderer(setID int, colorFrames [][]byte, options asciiOptions, cache *renderCache) *FrameRenderer {
 	return &FrameRenderer{
+		setID:       setID,
 		colorFrames: colorFrames,
 		options:     options,
-		maxEntries:  4096,
-		cache:       make(map[string]*list.Element),
-		order:       list.New(),
+		ramp:        []rune(resolveCharset(options.charset)),
+		cache:       cache,
 	}
 }
 
 func (r *FrameRenderer) render(index, width, height int, keepAspectRatio bool, tier colorTier) (string, error) {
-	key := fmt.Sprintf("%d:%dx%d:%t:%d", index, width, height, keepAspectRatio, tier)
-
-	r.mu.Lock()
-	if el, ok := r.cache[key]; ok {
-		r.order.MoveToBack(el)
-		ascii := el.Value.(*cacheEntry).ascii
-		r.mu.Unlock()
+	key := fmt.Sprintf("%d:%d:%dx%d:%t:%d", r.setID, index, width, height, keepAspectRatio, tier)
+	if ascii, ok := r.cache.get(key); ok {
 		return ascii, nil
 	}
-	r.mu.Unlock()
 
+	n := width * height
+	if tier != colorTierNone {
+		n *= 4
+	}
+	pix := getPixBuf(n)
+	img, err := resizeFrame(r.colorFrames[index], pix, width, height, keepAspectRatio, tier)
+	if err != nil {
+		putPixBuf(pix)
+		return "", err
+	}
 	var ascii string
 	if tier == colorTierNone {
-		img, err := resizeFrame(r.colorFrames[index], width, height, keepAspectRatio, tier)
-		if err != nil {
-			return "", err
-		}
-		ascii = frameToAscii(img.(*image.Gray).Pix, r.options)
+		ascii = frameToAscii(img.(*image.Gray).Pix, r.ramp, r.options)
 	} else {
-		img, err := resizeFrame(r.colorFrames[index], width, height, keepAspectRatio, tier)
-		if err != nil {
-			return "", err
-		}
-		ascii = frameToAnsi(img.(*image.NRGBA), r.options, tier)
+		ascii = frameToAnsi(img.(*image.NRGBA), r.ramp, r.options, tier)
 	}
+	putPixBuf(pix)
 
-	r.mu.Lock()
-	if _, ok := r.cache[key]; !ok {
-		r.cache[key] = r.order.PushBack(&cacheEntry{key, ascii})
-		if r.order.Len() > r.maxEntries {
-			oldest := r.order.Front()
-			r.order.Remove(oldest)
-			delete(r.cache, oldest.Value.(*cacheEntry).key)
-		}
-	}
-	r.mu.Unlock()
+	r.cache.put(key, ascii)
 	return ascii, nil
 }
