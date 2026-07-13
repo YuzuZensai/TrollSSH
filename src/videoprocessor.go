@@ -113,7 +113,7 @@ func extractFrames(path, vf, label string, maxDimension, totalFrames int) ([][]b
 			break
 		}
 		if err != nil {
-			cmd.Wait()
+			_ = cmd.Wait()
 			return nil, fmt.Errorf("ffmpeg stream error: %s", err.Error())
 		}
 	}

@@ -183,7 +183,7 @@ func (s *Server) Listen(host string, port int) error {
 func (s *Server) Close() {
 	s.closeOnce.Do(func() {
 		if s.listener != nil {
-			s.listener.Close()
+			_ = s.listener.Close()
 		}
 	})
 }
@@ -192,7 +192,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	ip := hostOnly(conn.RemoteAddr().String())
 
 	if s.tracker.hasReachedLimits(ip, s.config.MaxConnections, s.config.MaxTotalConnections) {
-		conn.Close()
+		_ = conn.Close()
 		logWarn("Connection rejected (limit reached) from", ip)
 		return
 	}
@@ -201,7 +201,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer s.tracker.decrement(ip)
 
 	if s.config.HandshakeTimeout > 0 {
-		conn.SetDeadline(time.Now().Add(s.config.HandshakeTimeout))
+		_ = conn.SetDeadline(time.Now().Add(s.config.HandshakeTimeout))
 	}
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshConfig)
@@ -211,12 +211,12 @@ func (s *Server) handleConn(conn net.Conn) {
 		} else {
 			logWarn(fmt.Sprintf("Client error from %s:", ip), sanitize(err.Error()))
 		}
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
-	conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 	logDebug("Handshake from", ip)
-	defer sshConn.Close()
+	defer func() { _ = sshConn.Close() }()
 
 	setIndex := rand.Intn(len(s.sets))
 	logInfo(fmt.Sprintf(
@@ -228,7 +228,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
-			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
 		channel, requests, err := newChannel.Accept()
@@ -318,7 +318,7 @@ func (s *Server) handleSession(
 				}
 				logDebug(fmt.Sprintf("Client %s TERM=%q -> color tier %d", ip, sanitizeN(term, 64), tier))
 			}
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 		case "window-change":
 			if len(req.Payload) >= 8 {
 				cols := int(binary.BigEndian.Uint32(req.Payload))
@@ -326,7 +326,7 @@ func (s *Server) handleSession(
 				size.set(cols, rows, s.config.MaxDimension)
 			}
 			if req.WantReply {
-				req.Reply(true, nil)
+				_ = req.Reply(true, nil)
 			}
 		case "exec":
 			command := ""
@@ -337,21 +337,21 @@ func (s *Server) handleSession(
 				}
 			}
 			logInfo(fmt.Sprintf("Client %s attempted exec: %q", ip, sanitizeN(command, 512)))
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 			if !started {
 				started = true
 				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
 			}
 		case "shell":
 			logDebug("Opening shell for session", ip)
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 			if !started {
 				started = true
 				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
 			}
 		default:
 			if req.WantReply {
-				req.Reply(false, nil)
+				_ = req.Reply(false, nil)
 			}
 		}
 	}
@@ -384,8 +384,8 @@ func (s *Server) playVideo(
 	logDebug(fmt.Sprintf("Terminal size %dx%d for %s", w, h, ip))
 
 	if s.fakeLogin != nil {
-		channel.Write([]byte(clearScreen))
-		channel.Write([]byte(*s.fakeLogin))
+		_, _ = channel.Write([]byte(clearScreen))
+		_, _ = channel.Write([]byte(*s.fakeLogin))
 	}
 
 	done := make(chan struct{})
@@ -465,7 +465,7 @@ func (s *Server) playVideo(
 			ascii, err := current.renderer.render(currentFrame, w, h, keepAspectRatio, tier)
 			if err != nil {
 				logError("Render error for", ip, sanitize(err.Error()))
-				sshConn.Close()
+				_ = sshConn.Close()
 				return
 			}
 
@@ -482,14 +482,14 @@ func (s *Server) playVideo(
 			currentFrame = 0
 			loopCount++
 			if config.MaxLoop > 0 && loopCount >= config.MaxLoop {
-				channel.Write([]byte(clearScreen))
+				_, _ = channel.Write([]byte(clearScreen))
 				if s.goodbye != nil {
-					channel.Write([]byte(*s.goodbye))
+					_, _ = channel.Write([]byte(*s.goodbye))
 				}
 				time.Sleep(1 * time.Second)
 				logInfo("Playback finished, closing session", ip)
-				channel.Close()
-				sshConn.Close()
+				_ = channel.Close()
+				_ = sshConn.Close()
 				return
 			}
 

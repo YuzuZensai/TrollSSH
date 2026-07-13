@@ -61,7 +61,9 @@ func generateFrames(config Config, framesDir, videoArg string) {
 		fail(fmt.Sprintf("Source video %q does not exist or is not a file.", videoArg))
 	}
 
-	os.MkdirAll(framesDir, 0o755)
+	if err := os.MkdirAll(framesDir, 0o755); err != nil {
+		fail(fmt.Sprintf("Failed to create frames directory %q: %s", framesDir, err.Error()))
+	}
 	base := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
 	output := filepath.Join(framesDir, base+".tsf")
 
@@ -142,7 +144,7 @@ func loadAllFrames(framesDir string) []*FramesContainer {
 }
 
 func main() {
-	godotenv.Load()
+	_ = godotenv.Load()
 	logThreshold = resolveThreshold()
 
 	config := loadConfig()
@@ -160,7 +162,9 @@ func main() {
 		return
 	}
 
-	os.MkdirAll(dataDir, 0o755)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		fail(fmt.Sprintf("Failed to create data directory %q: %s", dataDir, err.Error()))
+	}
 
 	var bannerText, fakeLoginText, goodbyeText *string
 	if text, ok := loadOptionalTextFile(filepath.Join(dataDir, "banner.txt")); ok {

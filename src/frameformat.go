@@ -20,7 +20,7 @@ func writeTSF(output string, data *FramesContainer) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	w := bufio.NewWriterSize(f, 1<<20)
 	if _, err := w.WriteString(tsfMagic); err != nil {

@@ -40,27 +40,40 @@ func TestTSFInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.tsf")
 
-	os.WriteFile(path, []byte("not a tsf file"), 0o644)
+	if err := os.WriteFile(path, []byte("not a tsf file"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	if _, err := loadTSF(path); err == nil {
 		t.Error("expected error for garbage input")
 	}
 
 	// Valid container but no frames.
-	writeTSF(path, &FramesContainer{FPS: 30})
+	if err := writeTSF(path, &FramesContainer{FPS: 30}); err != nil {
+		t.Fatalf("writeTSF: %v", err)
+	}
 	if _, err := loadTSF(path); err == nil {
 		t.Error("expected error for empty frames")
 	}
 
 	// Valid container but fps <= 0.
-	writeTSF(path, &FramesContainer{ColorFrames: [][]byte{{1}}, FPS: 0})
+	if err := writeTSF(path, &FramesContainer{ColorFrames: [][]byte{{1}}, FPS: 0}); err != nil {
+		t.Fatalf("writeTSF: %v", err)
+	}
 	if _, err := loadTSF(path); err == nil {
 		t.Error("expected error for fps<=0")
 	}
 
 	// Truncated payload.
-	writeTSF(path, &FramesContainer{ColorFrames: [][]byte{{1, 2, 3, 4}}, FPS: 30})
-	raw, _ := os.ReadFile(path)
-	os.WriteFile(path, raw[:len(raw)-2], 0o644)
+	if err := writeTSF(path, &FramesContainer{ColorFrames: [][]byte{{1, 2, 3, 4}}, FPS: 30}); err != nil {
+		t.Fatalf("writeTSF: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if err := os.WriteFile(path, raw[:len(raw)-2], 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	if _, err := loadTSF(path); err == nil {
 		t.Error("expected error for truncated file")
 	}

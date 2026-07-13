@@ -76,7 +76,7 @@ func emit(level logLevel, name string, stream *os.File, args []any) {
 		}
 	}
 	ts := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	fmt.Fprintf(stream, "[%s] %-5s %s\n", ts, strings.ToUpper(name), strings.Join(parts, " "))
+	_, _ = fmt.Fprintf(stream, "[%s] %-5s %s\n", ts, strings.ToUpper(name), strings.Join(parts, " "))
 }
 
 func logDebug(args ...any) { emit(levelDebug, "debug", os.Stdout, args) }
