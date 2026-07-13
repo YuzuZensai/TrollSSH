@@ -138,5 +138,7 @@ func loadOptionalTextFile(filePath string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return string(data), true
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\n", "\r\n")
+	return text, true
 }
