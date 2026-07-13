@@ -10,6 +10,7 @@ node_modules
 dist
 docs
 
-config
+data
+frames
 .vscode
 video.mp4

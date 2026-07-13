@@ -1,7 +1,10 @@
 video.mp4
 
-#Configs
-config/
+# Host keys & text assets
+data/
+
+# Generated frame sets
+frames/
 
 #VSCode
 .vscode

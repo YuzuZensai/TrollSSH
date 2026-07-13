@@ -1,21 +1,22 @@
 {
     "name": "trollssh",
     "version": "1.0.0",
-    "main": "index.js",
+    "main": "src/index.ts",
     "repository": "https://github.com/YuzuZensai/TrollSSH.git",
     "author": "Yuzu <yuzu@kirameki.cafe>",
     "license": "GPL-3.0",
+    "engines": {
+        "bun": ">=1.2.0"
+    },
     "scripts": {
         "dev": "bun --watch src/index.ts",
-        "build": "tsc -b",
-        "start": "bun dist/index.js",
+        "start": "bun src/index.ts",
         "typecheck": "tsc --noEmit",
         "lint": "eslint .",
         "format": "prettier --check .",
         "format:fix": "prettier --write .",
         "test": "bun test",
         "docker-build": "docker build . -t ghcr.io/yuzuzensai/trollssh:latest",
-        "docker-run": "docker run -d --name trollssh --mount type=bind,source=\"$(pwd)\"/config,target=/home/node/app/config --mount type=bind,source=\"$(pwd)\"/video.mp4,target=/home/node/app/video.mp4 --network host --env-file .env ghcr.io/yuzuzensai/trollssh:latest",
         "docker-push": "docker push ghcr.io/yuzuzensai/trollssh:latest"
     },
     "devDependencies": {

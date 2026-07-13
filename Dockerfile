@@ -1,14 +1,4 @@
-FROM oven/bun:1 AS build
-WORKDIR /home/bun/app
-
-COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
-
-COPY tsconfig.json ./
-COPY src ./src
-RUN bun run build
-
-FROM oven/bun:1-slim
+FROM oven/bun:1.2-slim
 WORKDIR /home/bun/app
 
 RUN apt-get update -y && \
@@ -18,6 +8,7 @@ RUN apt-get update -y && \
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
-COPY --from=build /home/bun/app/dist ./dist
+COPY tsconfig.json ./
+COPY src ./src
 
-CMD ["bun", "dist/index.js"]
+CMD ["bun", "src/index.ts"]
