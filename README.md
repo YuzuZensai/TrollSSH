@@ -1,17 +1,17 @@
 # 👻 TrollSSH
 
-A fake SSH server that accepts any login and plays ASCII video at whoever
-connects to it
+A fake SSH server that accepts any login and plays back video as colored
+ASCII/Unicode art at whoever connects to it
 
 ![SSH Demo](assets/ssh.webp)
 
 # Features
 
 - **Accept any credentials**
-- **ASCII video playback** - resized live to the client's terminal
+- **Colored ASCII/Unicode video playback** - resized live to the client's
+  terminal, using a configurable character ramp, defaults to the Unicode block-character preset
 - **Automatic color detection** - renders 24-bit truecolor, 256-color, or
-  plain grayscale ASCII depending on what the connecting client reports
-  supporting
+  plain grayscale depending on what the connecting client reports supporting
 - **Multiple frame sets** - clients get a random one, arrow keys switch between
   them (configurable)
 - **Honeypot extras** - optional credential logging, per-IP and global
