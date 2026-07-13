@@ -9,6 +9,9 @@ connects to it
 
 - **Accept any credentials**
 - **ASCII video playback** - resized live to the client's terminal
+- **Automatic color detection** - renders 24-bit truecolor, 256-color, or
+  plain grayscale ASCII depending on what the connecting client reports
+  supporting
 - **Multiple frame sets** - clients get a random one, arrow keys switch between
   them (configurable)
 - **Honeypot extras** - optional credential logging, per-IP and global
@@ -25,9 +28,9 @@ docker run --rm -v ./video.mp4:/home/app/video.mp4 -v ./frames:/home/app/frames 
     ghcr.io/yuzuzensai/trollssh:latest trollssh --generate --video video.mp4
 ```
 
-This writes `frames/<name>.tsf`, a simple container of JPEG frames plus the
-source fps. You can drop as many `.tsf` files into `frames/` as you like. The server will
-loads all of them.
+This writes `frames/<name>.tsf`, a simple container of color JPEG frames plus
+the source fps. You can drop as many `.tsf` files into `frames/` as you like.
+The server loads all of them.
 
 Run the server with [`docker-compose.yaml`](docker-compose.yaml)
 
