@@ -94,23 +94,16 @@ func putOutBuf(b []byte) {
 	outPool.Put(&b)
 }
 
-func resizeFrame(frame, pix []byte, width, height int, keepAspectRatio bool, tier colorTier) (draw.Image, error) {
+func resizeFrame(frame, pix []byte, width, height int, keepAspectRatio bool) (*image.RGBA, error) {
 	src, err := jpeg.Decode(bytes.NewReader(frame))
 	if err != nil {
 		return nil, err
 	}
 	rect := image.Rect(0, 0, width, height)
-	var dst draw.Image
-	var bg color.Color
-	if tier == colorTierNone {
-		dst = &image.Gray{Pix: pix[:width*height], Stride: width, Rect: rect}
-		bg = color.Gray{0}
-	} else {
-		dst = &image.NRGBA{Pix: pix[:4*width*height], Stride: 4 * width, Rect: rect}
-		bg = color.Black
-	}
+
+	dst := &image.RGBA{Pix: pix[:4*width*height], Stride: 4 * width, Rect: rect}
 	if keepAspectRatio {
-		draw.Draw(dst, dst.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
+		draw.Draw(dst, dst.Bounds(), image.NewUniform(color.Black), image.Point{}, draw.Src)
 		sb := src.Bounds()
 		sw, sh := sb.Dx(), sb.Dy()
 		scale := min(float64(width)/float64(sw), float64(height)/float64(sh))
@@ -131,6 +124,15 @@ type asciiOptions struct {
 	invert              bool
 }
 
+func buildRampLUT(ramp []rune, options asciiOptions) *[101][]byte {
+	var lut [101][]byte
+	for b := range lut {
+		index := rampIndex(b, options.brightnessThreshold, len(ramp), options.invert)
+		lut[b] = utf8.AppendRune(nil, ramp[index])
+	}
+	return &lut
+}
+
 func rampIndex(brightness, threshold, total int, invert bool) int {
 	var index int
 	if brightness < threshold {
@@ -147,13 +149,12 @@ func rampIndex(brightness, threshold, total int, invert bool) int {
 	return index
 }
 
-func frameToAscii(pixels []byte, ramp []rune, options asciiOptions) string {
-	total := len(ramp)
-	buf := getOutBuf(len(pixels) * 4)
-	for _, p := range pixels {
-		brightness := int(p) * 100 / 255
-		index := rampIndex(brightness, options.brightnessThreshold, total, options.invert)
-		buf = utf8.AppendRune(buf, ramp[index])
+func frameToAscii(img *image.RGBA, rampLUT *[101][]byte) string {
+	pix := img.Pix
+	buf := getOutBuf(len(pix))
+	for o := 0; o < len(pix); o += 4 {
+		brightness := (int(pix[o])*299 + int(pix[o+1])*587 + int(pix[o+2])*114) / 255 / 10
+		buf = append(buf, rampLUT[brightness]...)
 	}
 	ascii := string(buf)
 	putOutBuf(buf)
@@ -164,11 +165,18 @@ const ansiReset = "\x1b[0m"
 
 var ansi256Levels = [6]int{0, 95, 135, 175, 215, 255}
 
-func quantize256(r, g, b uint8) int {
-	toLevel := func(v uint8) int {
+var decimal = func() (t [256]string) {
+	for i := range t {
+		t[i] = strconv.Itoa(i)
+	}
+	return
+}()
+
+var ansi256Cube = func() (t [256]uint8) {
+	for v := range t {
 		best, bestDist := 0, 1<<30
 		for i, l := range ansi256Levels {
-			d := int(v) - l
+			d := v - l
 			if d < 0 {
 				d = -d
 			}
@@ -176,28 +184,31 @@ func quantize256(r, g, b uint8) int {
 				bestDist, best = d, i
 			}
 		}
-		return best
+		t[v] = uint8(best)
 	}
-	return 16 + 36*toLevel(r) + 6*toLevel(g) + toLevel(b)
+	return
+}()
+
+func quantize256(r, g, b uint8) int {
+	return 16 + 36*int(ansi256Cube[r]) + 6*int(ansi256Cube[g]) + int(ansi256Cube[b])
 }
 
 func appendColor(buf []byte, r, g, b uint8, tier colorTier) []byte {
 	if tier == colorTierTrueColor {
 		buf = append(buf, "\x1b[38;2;"...)
-		buf = strconv.AppendUint(buf, uint64(r), 10)
+		buf = append(buf, decimal[r]...)
 		buf = append(buf, ';')
-		buf = strconv.AppendUint(buf, uint64(g), 10)
+		buf = append(buf, decimal[g]...)
 		buf = append(buf, ';')
-		buf = strconv.AppendUint(buf, uint64(b), 10)
+		buf = append(buf, decimal[b]...)
 	} else {
 		buf = append(buf, "\x1b[38;5;"...)
-		buf = strconv.AppendUint(buf, uint64(quantize256(r, g, b)), 10)
+		buf = append(buf, decimal[quantize256(r, g, b)]...)
 	}
 	return append(buf, 'm')
 }
 
-func frameToAnsi(img *image.NRGBA, ramp []rune, options asciiOptions, tier colorTier) string {
-	total := len(ramp)
+func frameToAnsi(img *image.RGBA, rampLUT *[101][]byte, tier colorTier) string {
 	bounds := img.Bounds()
 	buf := getOutBuf(bounds.Dx() * bounds.Dy() * 16)
 	var lastR, lastG, lastB uint8
@@ -207,13 +218,12 @@ func frameToAnsi(img *image.NRGBA, ramp []rune, options asciiOptions, tier color
 			o := img.PixOffset(x, y)
 			r, g, bl := img.Pix[o], img.Pix[o+1], img.Pix[o+2]
 			brightness := (int(r)*299 + int(g)*587 + int(bl)*114) / 255 / 10
-			index := rampIndex(brightness, options.brightnessThreshold, total, options.invert)
 			if first || r != lastR || g != lastG || bl != lastB {
 				buf = appendColor(buf, r, g, bl, tier)
 				lastR, lastG, lastB = r, g, bl
 				first = false
 			}
-			buf = utf8.AppendRune(buf, ramp[index])
+			buf = append(buf, rampLUT[brightness]...)
 		}
 		if y < bounds.Max.Y-1 {
 			buf = append(buf, ansiReset+"\r\n"...)
@@ -296,17 +306,22 @@ type FrameRenderer struct {
 	setID       int
 	colorFrames [][]byte
 	options     asciiOptions
-	ramp        []rune
+	rampLUT     *[101][]byte
 	cache       *renderCache
+
+	inflightMu sync.Mutex
+	inflight   map[string]chan struct{}
 }
 
 func newFrameRenderer(setID int, colorFrames [][]byte, options asciiOptions, cache *renderCache) *FrameRenderer {
+	ramp := []rune(resolveCharset(options.charset))
 	return &FrameRenderer{
 		setID:       setID,
 		colorFrames: colorFrames,
 		options:     options,
-		ramp:        []rune(resolveCharset(options.charset)),
+		rampLUT:     buildRampLUT(ramp, options),
 		cache:       cache,
+		inflight:    make(map[string]chan struct{}),
 	}
 }
 
@@ -316,21 +331,41 @@ func (r *FrameRenderer) render(index, width, height int, keepAspectRatio bool, t
 		return ascii, nil
 	}
 
-	n := width * height
-	if tier != colorTierNone {
-		n *= 4
+	if r.cache != nil {
+		for {
+			r.inflightMu.Lock()
+			wait, ok := r.inflight[key]
+			if !ok {
+				done := make(chan struct{})
+				r.inflight[key] = done
+				r.inflightMu.Unlock()
+				defer func() {
+					r.inflightMu.Lock()
+					delete(r.inflight, key)
+					r.inflightMu.Unlock()
+					close(done)
+				}()
+				break
+			}
+			r.inflightMu.Unlock()
+			<-wait
+			if ascii, ok := r.cache.get(key); ok {
+				return ascii, nil
+			}
+		}
 	}
-	pix := getPixBuf(n)
-	img, err := resizeFrame(r.colorFrames[index], pix, width, height, keepAspectRatio, tier)
+
+	pix := getPixBuf(4 * width * height)
+	img, err := resizeFrame(r.colorFrames[index], pix, width, height, keepAspectRatio)
 	if err != nil {
 		putPixBuf(pix)
 		return "", err
 	}
 	var ascii string
 	if tier == colorTierNone {
-		ascii = frameToAscii(img.(*image.Gray).Pix, r.ramp, r.options)
+		ascii = frameToAscii(img, r.rampLUT)
 	} else {
-		ascii = frameToAnsi(img.(*image.NRGBA), r.ramp, r.options, tier)
+		ascii = frameToAnsi(img, r.rampLUT, tier)
 	}
 	putPixBuf(pix)
 

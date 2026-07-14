@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -169,7 +173,11 @@ func TestFrameToAscii(t *testing.T) {
 	// Below threshold -> first ramp char; full brightness -> last.
 	opts := asciiOptions{brightnessThreshold: 40, charset: "standard"}
 	ramp := []rune(resolveCharset("standard"))
-	out := []rune(frameToAscii([]byte{0, 255}, ramp, opts))
+	img := &image.RGBA{
+		Pix:    []byte{0, 0, 0, 255, 255, 255, 255, 255},
+		Stride: 8, Rect: image.Rect(0, 0, 2, 1),
+	}
+	out := []rune(frameToAscii(img, buildRampLUT(ramp, opts)))
 	if out[0] != ramp[0] {
 		t.Errorf("dark px = %q, want %q", out[0], ramp[0])
 	}
@@ -181,9 +189,50 @@ func TestFrameToAscii(t *testing.T) {
 func TestFrameToAsciiInvert(t *testing.T) {
 	opts := asciiOptions{brightnessThreshold: 40, charset: "standard", invert: true}
 	ramp := []rune(resolveCharset("standard"))
-	out := []rune(frameToAscii([]byte{255}, ramp, opts))
+	img := &image.RGBA{
+		Pix:    []byte{255, 255, 255, 255},
+		Stride: 4, Rect: image.Rect(0, 0, 1, 1),
+	}
+	out := []rune(frameToAscii(img, buildRampLUT(ramp, opts)))
 	if out[0] != ramp[0] {
 		t.Errorf("inverted bright = %q, want %q", out[0], ramp[0])
+	}
+}
+
+func TestRenderConcurrentSameKey(t *testing.T) {
+	var jpegBuf bytes.Buffer
+	src := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 7)
+	}
+	if err := jpeg.Encode(&jpegBuf, src, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newFrameRenderer(0, [][]byte{jpegBuf.Bytes()}, asciiOptions{
+		brightnessThreshold: 40,
+		charset:             "standard",
+	}, newRenderCache(1<<20))
+
+	var wg sync.WaitGroup
+	results := make([]string, 32)
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ascii, err := r.render(0, 20, 10, false, colorTierTrueColor)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			results[i] = ascii
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range results {
+		if got != results[0] {
+			t.Fatalf("result %d differs from result 0", i)
+		}
 	}
 }
 

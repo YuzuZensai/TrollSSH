@@ -457,6 +457,7 @@ func (s *Server) playVideo(
 	currentFrame := 0
 	loopCount := 0
 	lastW, lastH := 0, 0
+	var writeBuf []byte
 
 	for {
 		select {
@@ -488,7 +489,11 @@ func (s *Server) playVideo(
 				prefix = clearScreen
 				lastW, lastH = w, h
 			}
-			if _, err := channel.Write([]byte(syncStart + prefix + ascii + syncEnd)); err != nil {
+			writeBuf = append(writeBuf[:0], syncStart...)
+			writeBuf = append(writeBuf, prefix...)
+			writeBuf = append(writeBuf, ascii...)
+			writeBuf = append(writeBuf, syncEnd...)
+			if _, err := channel.Write(writeBuf); err != nil {
 				closeSession()
 				return
 			}
