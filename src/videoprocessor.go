@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -17,29 +22,177 @@ var (
 	jpegEOI = []byte{0xff, 0xd9}
 )
 
+const (
+	maxJPEGFrameBytes = 64 << 20
+	maxFFmpegLogBytes = 64 << 10
+)
+
 type jpegFrameSplitter struct {
 	buffer []byte
+	scan   int
+	inJPEG bool
 }
 
-func (s *jpegFrameSplitter) push(chunk []byte) [][]byte {
+func (s *jpegFrameSplitter) push(chunk []byte, emit func([]byte) error) (int, error) {
 	s.buffer = append(s.buffer, chunk...)
-	var frames [][]byte
+	emitted := 0
 	for {
-		start := bytes.Index(s.buffer, jpegSOI)
-		if start == -1 {
-			break
+		if !s.inJPEG {
+			start := bytes.Index(s.buffer[s.scan:], jpegSOI)
+			if start == -1 {
+				// Retain only a possible marker prefix spanning two reads.
+				if len(s.buffer) > 0 && s.buffer[len(s.buffer)-1] == jpegSOI[0] {
+					s.buffer = s.buffer[len(s.buffer)-1:]
+				} else {
+					s.buffer = s.buffer[:0]
+				}
+				s.scan = 0
+				return emitted, nil
+			}
+			start += s.scan
+			s.buffer = s.buffer[start:]
+			s.scan = len(jpegSOI)
+			s.inJPEG = true
 		}
-		end := bytes.Index(s.buffer[start+len(jpegSOI):], jpegEOI)
+
+		end := bytes.Index(s.buffer[s.scan:], jpegEOI)
 		if end == -1 {
-			break
+			if len(s.buffer) > maxJPEGFrameBytes {
+				return emitted, fmt.Errorf("JPEG frame exceeds %d MiB limit", maxJPEGFrameBytes>>20)
+			}
+			s.scan = max(len(jpegSOI), len(s.buffer)-1)
+			return emitted, nil
 		}
-		frameEnd := start + len(jpegSOI) + end + len(jpegEOI)
-		frame := make([]byte, frameEnd-start)
-		copy(frame, s.buffer[start:frameEnd])
-		frames = append(frames, frame)
+		frameEnd := s.scan + end + len(jpegEOI)
+		if frameEnd > maxJPEGFrameBytes {
+			return emitted, fmt.Errorf("JPEG frame exceeds %d MiB limit", maxJPEGFrameBytes>>20)
+		}
+		if err := emit(s.buffer[:frameEnd]); err != nil {
+			return emitted, err
+		}
+		emitted++
 		s.buffer = s.buffer[frameEnd:]
+		s.scan = 0
+		s.inJPEG = false
 	}
-	return frames
+}
+
+func (s *jpegFrameSplitter) finish() error {
+	if s.inJPEG {
+		return fmt.Errorf("ffmpeg produced a truncated JPEG frame")
+	}
+	return nil
+}
+
+type boundedLog struct {
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (w *boundedLog) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := w.limit - w.buffer.Len(); remaining > 0 {
+		_, _ = w.buffer.Write(p[:min(len(p), remaining)])
+	}
+	return n, nil
+}
+
+func (w *boundedLog) String() string {
+	return strings.TrimSpace(w.buffer.String())
+}
+
+type streamingTSF struct {
+	file   *os.File
+	writer *bufio.Writer
+	path   string
+	count  uint32
+}
+
+func newStreamingTSF(output string, fps float64) (*streamingTSF, error) {
+	if math.IsNaN(fps) || math.IsInf(fps, 0) || fps <= 0 || fps > maxTSFFPS {
+		return nil, fmt.Errorf("cannot write .tsf: fps must be finite and between 0 and %d", maxTSFFPS)
+	}
+	dir := filepath.Dir(output)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(output)+"-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	s := &streamingTSF{file: f, writer: bufio.NewWriterSize(f, 1<<20), path: f.Name()}
+	if err := f.Chmod(0o644); err != nil {
+		s.abort()
+		return nil, err
+	}
+	if _, err := s.writer.WriteString(tsfMagic); err != nil {
+		s.abort()
+		return nil, err
+	}
+	var hdr [14]byte
+	binary.LittleEndian.PutUint16(hdr[0:], tsfVersion)
+	binary.LittleEndian.PutUint64(hdr[2:], math.Float64bits(fps))
+	if _, err := s.writer.Write(hdr[:]); err != nil {
+		s.abort()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *streamingTSF) addFrame(frame []byte) error {
+	if s.count >= maxTSFFrameCount {
+		return fmt.Errorf("too many video frames")
+	}
+	if uint64(len(frame)) > math.MaxUint32 {
+		return fmt.Errorf("JPEG frame is too large")
+	}
+	var size [4]byte
+	binary.LittleEndian.PutUint32(size[:], uint32(len(frame)))
+	if _, err := s.writer.Write(size[:]); err != nil {
+		return err
+	}
+	if _, err := s.writer.Write(frame); err != nil {
+		return err
+	}
+	s.count++
+	return nil
+}
+
+func (s *streamingTSF) commit(output string) error {
+	if s.count == 0 {
+		return fmt.Errorf("no frames were decoded from the video")
+	}
+	if err := s.writer.Flush(); err != nil {
+		return err
+	}
+	if _, err := s.file.Seek(14, io.SeekStart); err != nil {
+		return err
+	}
+	var count [4]byte
+	binary.LittleEndian.PutUint32(count[:], s.count)
+	if _, err := s.file.Write(count[:]); err != nil {
+		return err
+	}
+	if err := s.file.Sync(); err != nil {
+		return err
+	}
+	if err := s.file.Close(); err != nil {
+		return err
+	}
+	s.file = nil
+	if err := os.Rename(s.path, output); err != nil {
+		return err
+	}
+	s.path = ""
+	return nil
+}
+
+func (s *streamingTSF) abort() {
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
+	if s.path != "" {
+		_ = os.Remove(s.path)
+		s.path = ""
+	}
 }
 
 type ffprobeOutput struct {
@@ -72,59 +225,82 @@ func parseFrameRate(rate string) float64 {
 	return num
 }
 
-func extractFrames(path, vf, label string, maxDimension, totalFrames int) ([][]byte, error) {
+func extractFrames(path, vf, label string, totalFrames int, emit func([]byte) error) (int, error) {
 	cmd := exec.Command(
-		"ffmpeg", "-i", path,
+		"ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
+		"-i", path,
 		"-c:v", "mjpeg",
 		"-q:v", "3",
 		"-vf", vf,
 		"-f", "image2pipe",
 		"pipe:1",
 	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := &boundedLog{limit: maxFFmpegLogBytes}
+	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("ffmpeg failed: %w", err)
+		return 0, fmt.Errorf("ffmpeg failed: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("ffmpeg failed: %w", err)
+		return 0, fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
-	var frames [][]byte
 	splitter := &jpegFrameSplitter{}
-	reportProgress := func(count int) {
-		if totalFrames > 0 {
-			pct := min(100, int(math.Round(float64(count)/float64(totalFrames)*100)))
-			fmt.Printf("\rGenerating %s frames: %d/%d (%d%%)", label, count, totalFrames, pct)
-		} else {
-			fmt.Printf("\rGenerating %s frames: %d", label, count)
+	frameCount := 0
+	lastReport := time.Now()
+	reportProgress := func(force bool) {
+		if !force && time.Since(lastReport) < 250*time.Millisecond {
+			return
 		}
+		if totalFrames > 0 {
+			pct := min(100, int(math.Round(float64(frameCount)/float64(totalFrames)*100)))
+			fmt.Printf("\rGenerating %s frames: %d/%d (%d%%)", label, frameCount, totalFrames, pct)
+		} else {
+			fmt.Printf("\rGenerating %s frames: %d", label, frameCount)
+		}
+		lastReport = time.Now()
+	}
+	failStream := func(err error) (int, error) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return frameCount, err
 	}
 
 	buf := make([]byte, 256*1024)
 	for {
-		n, err := stdout.Read(buf)
+		n, readErr := stdout.Read(buf)
 		if n > 0 {
-			frames = append(frames, splitter.push(buf[:n])...)
-			reportProgress(len(frames))
+			emitted, splitErr := splitter.push(buf[:n], emit)
+			frameCount += emitted
+			if splitErr != nil {
+				return failStream(fmt.Errorf("ffmpeg stream error: %w", splitErr))
+			}
+			if emitted > 0 {
+				reportProgress(false)
+			}
 		}
-		if err == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			_ = cmd.Wait()
-			return nil, fmt.Errorf("ffmpeg stream error: %s", err.Error())
+		if readErr != nil {
+			return failStream(fmt.Errorf("ffmpeg stream error: %w", readErr))
 		}
 	}
 	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("ffmpeg failed: %s", strings.TrimSpace(stderr.String()))
+		if msg := stderr.String(); msg != "" {
+			return frameCount, fmt.Errorf("ffmpeg failed: %s", msg)
+		}
+		return frameCount, fmt.Errorf("ffmpeg failed: %w", err)
 	}
-	if len(frames) == 0 {
-		return nil, fmt.Errorf("no frames were decoded from the video")
+	if err := splitter.finish(); err != nil {
+		return frameCount, err
 	}
+	if frameCount == 0 {
+		return 0, fmt.Errorf("no frames were decoded from the video")
+	}
+	reportProgress(true)
 	fmt.Println()
-	return frames, nil
+	return frameCount, nil
 }
 
 func processVideo(path, output string, maxDimension int) error {
@@ -175,15 +351,19 @@ func processVideo(path, output string, maxDimension int) error {
 		maxDimension, maxDimension,
 	)
 
-	colorFrames, err := extractFrames(path, scaleFilter, "color", maxDimension, totalFrames)
+	outputFile, err := newStreamingTSF(output, fps)
 	if err != nil {
 		return err
 	}
+	defer outputFile.abort()
 
-	videoData := FramesContainer{FPS: fps, ColorFrames: colorFrames}
-	if err := writeTSF(output, &videoData); err != nil {
+	frameCount, err := extractFrames(path, scaleFilter, "color", totalFrames, outputFile.addFrame)
+	if err != nil {
 		return err
 	}
-	logInfo(fmt.Sprintf("Saved %d frames to %s", len(videoData.ColorFrames), output))
+	if err := outputFile.commit(output); err != nil {
+		return err
+	}
+	logInfo(fmt.Sprintf("Saved %d frames to %s", frameCount, output))
 	return nil
 }
