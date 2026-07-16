@@ -4,6 +4,7 @@ package main
 
 import "os"
 
-func readFrameFile(filename string) ([]byte, error) {
-	return os.ReadFile(filename)
+func readFrameFile(filename string) (*frameFile, error) {
+	data, err := os.ReadFile(filename)
+	return &frameFile{data: data}, err
 }

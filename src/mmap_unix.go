@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-func readFrameFile(filename string) ([]byte, error) {
+func readFrameFile(filename string) (*frameFile, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -20,11 +20,18 @@ func readFrameFile(filename string) ([]byte, error) {
 	}
 	size := info.Size()
 	if size <= 0 || size != int64(int(size)) {
-		return os.ReadFile(filename)
+		data, err := os.ReadFile(filename)
+		return &frameFile{data: data}, err
 	}
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
-		return os.ReadFile(filename)
+		data, err := os.ReadFile(filename)
+		return &frameFile{data: data}, err
 	}
-	return data, nil
+	return &frameFile{
+		data: data,
+		cleanup: func() error {
+			return syscall.Munmap(data)
+		},
+	}, nil
 }
