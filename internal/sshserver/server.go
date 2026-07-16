@@ -447,17 +447,36 @@ type termSize struct {
 	width   int
 	height  int
 	updated time.Time
+	timer   *time.Timer
 }
 
 func (t *termSize) set(w, h, maxDimension, maxCells int, force bool) {
+	width, height := clampTermSize(w, h, maxDimension, maxCells, terminalSizeQuantum)
+
 	t.mu.Lock()
-	if !force && time.Since(t.updated) < resizeDebounce {
-		t.mu.Unlock()
-		return
+	defer t.mu.Unlock()
+
+	if !force {
+		if remaining := resizeDebounce - time.Since(t.updated); remaining > 0 {
+			if t.timer != nil {
+				t.timer.Stop()
+			}
+			t.timer = time.AfterFunc(remaining, func() {
+				t.mu.Lock()
+				defer t.mu.Unlock()
+				t.width, t.height = width, height
+				t.updated = time.Now()
+			})
+			return
+		}
 	}
-	t.width, t.height = clampTermSize(w, h, maxDimension, maxCells, terminalSizeQuantum)
+
+	if t.timer != nil {
+		t.timer.Stop()
+		t.timer = nil
+	}
+	t.width, t.height = width, height
 	t.updated = time.Now()
-	t.mu.Unlock()
 }
 
 func (t *termSize) get() (int, int) {

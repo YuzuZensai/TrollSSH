@@ -3,6 +3,7 @@ package sshserver
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -99,6 +100,26 @@ func TestTermSizeDebouncesResize(t *testing.T) {
 	size.set(200, 100, 512, 500*512, true)
 	if w, h := size.get(); w != 200 || h != 100 {
 		t.Fatalf("forced size = %dx%d", w, h)
+	}
+}
+
+func TestTermSizeAppliesFinalResizeAfterDebounce(t *testing.T) {
+	size := &termSize{}
+	size.set(80, 24, 512, 500*512, true)
+
+	// Rapid burst of resize events, as happens during an interactive drag-resize.
+	size.set(100, 40, 512, 500*512, false)
+	size.set(150, 60, 512, 500*512, false)
+	size.set(200, 100, 512, 500*512, false)
+
+	if w, h := size.get(); w != 80 || h != 24 {
+		t.Fatalf("size changed before debounce elapsed: %dx%d", w, h)
+	}
+
+	time.Sleep(resizeDebounce + 50*time.Millisecond)
+
+	if w, h := size.get(); w != 200 || h != 100 {
+		t.Fatalf("final resize was not applied after debounce: got %dx%d, want 200x100", w, h)
 	}
 }
 
