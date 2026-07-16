@@ -3,6 +3,7 @@ services:
         image: ghcr.io/yuzuzensai/trollssh:v1.0.1
         container_name: trollssh
         restart: unless-stopped
+        mem_limit: ${MEMORY_LIMIT:-2g}
         ports:
             - "22:22"
         env_file:
