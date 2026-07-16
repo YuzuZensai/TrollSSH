@@ -28,10 +28,19 @@ func readFrameFile(filename string) (*frameFile, error) {
 		data, err := os.ReadFile(filename)
 		return &frameFile{data: data}, err
 	}
+
+	_ = syscall.Madvise(data, syscall.MADV_RANDOM)
 	return &frameFile{
 		data: data,
 		cleanup: func() error {
 			return syscall.Munmap(data)
 		},
 	}, nil
+}
+
+func (f *frameFile) dropResident() {
+	if f == nil || f.cleanup == nil || len(f.data) == 0 {
+		return
+	}
+	_ = syscall.Madvise(f.data, syscall.MADV_DONTNEED)
 }

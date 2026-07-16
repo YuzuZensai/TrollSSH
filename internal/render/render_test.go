@@ -88,12 +88,25 @@ func TestRenderConcurrentSameKey(t *testing.T) {
 	}
 }
 
+func incompressible(n int) []byte {
+	b := make([]byte, n)
+	x := uint32(0x9e3779b9)
+	for i := range b {
+		x ^= x << 13
+		x ^= x >> 17
+		x ^= x << 5
+		b[i] = byte(x)
+	}
+	return b
+}
+
 func TestRenderCacheEvictsByBytes(t *testing.T) {
 	key := func(index int) cacheKey { return cacheKey{index: index} }
-	budget := 3 * entryCost(key(0), bytes.Repeat([]byte("x"), 1000))
+	payload := incompressible(1000)
+	budget := 3 * entryCost(key(0), compressAscii(payload))
 	c := NewCache(budget)
 	for i := range 5 {
-		c.put(key(i), bytes.Repeat([]byte("x"), 1000))
+		c.put(key(i), payload)
 	}
 	if c.size.Load() > budget {
 		t.Errorf("size %d exceeds budget %d", c.size.Load(), budget)
@@ -103,6 +116,19 @@ func TestRenderCacheEvictsByBytes(t *testing.T) {
 	}
 	if _, ok := c.get(key(4)); !ok {
 		t.Error("newest entry should be cached")
+	}
+}
+
+func TestRenderCacheRoundTrips(t *testing.T) {
+	c := NewCache(1 << 20)
+	want := incompressible(4096)
+	c.put(cacheKey{}, want)
+	got, ok := c.get(cacheKey{})
+	if !ok {
+		t.Fatal("entry should be cached")
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("decompressed entry does not match original")
 	}
 }
 
@@ -119,7 +145,7 @@ func TestRenderCacheDisabled(t *testing.T) {
 
 func TestRenderCacheRejectsOversizedEntry(t *testing.T) {
 	c := NewCache(256)
-	c.put(cacheKey{}, bytes.Repeat([]byte("x"), 10_000))
+	c.put(cacheKey{}, incompressible(10_000))
 	if _, ok := c.get(cacheKey{}); ok {
 		t.Error("entry larger than budget should not be cached")
 	}
@@ -128,15 +154,15 @@ func TestRenderCacheRejectsOversizedEntry(t *testing.T) {
 	}
 }
 
-func TestRenderCacheAccountsRetainedCapacity(t *testing.T) {
+func TestRenderCacheAccountsCompressedSize(t *testing.T) {
 	cache := NewCache(512)
 	value := make([]byte, 1, 4096)
 	cache.put(cacheKey{}, value)
-	if _, ok := cache.get(cacheKey{}); ok {
-		t.Fatal("cache accepted an entry whose backing allocation exceeds its budget")
+	if _, ok := cache.get(cacheKey{}); !ok {
+		t.Fatal("small value should be cached regardless of its backing capacity")
 	}
-	if cache.Stats().Rejections != 1 {
-		t.Fatalf("rejections = %d, want 1", cache.Stats().Rejections)
+	if got := cache.size.Load(); got > 512 {
+		t.Fatalf("size = %d, want <= 512", got)
 	}
 }
 

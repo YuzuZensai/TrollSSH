@@ -112,6 +112,9 @@ func Load(filename string) (*FramesContainer, error) {
 	if off != len(raw) {
 		return nil, invalid()
 	}
+
+	file.dropResident()
+
 	data := &FramesContainer{ColorFrames: colorFrames, FPS: fps}
 	frameFileOwners.Store(data, file)
 	owned = true

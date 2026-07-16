@@ -2,7 +2,9 @@ package render
 
 import (
 	"bytes"
+	"compress/flate"
 	"container/list"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,13 +39,48 @@ type Cache struct {
 }
 
 type cacheEntry struct {
-	key   cacheKey
-	ascii []byte
-	cost  int64
+	key     cacheKey
+	data    []byte
+	origLen int
+	cost    int64
 }
 
-func entryCost(_ cacheKey, ascii []byte) int64 {
-	return int64(cap(ascii)) + 160
+func entryCost(_ cacheKey, data []byte) int64 {
+	return int64(cap(data)) + 160
+}
+
+var flateWriters = sync.Pool{New: func() any {
+	w, _ := flate.NewWriter(io.Discard, 1)
+	return w
+}}
+
+type flateReader interface {
+	io.Reader
+	flate.Resetter
+}
+
+var flateReaders = sync.Pool{New: func() any {
+	return flate.NewReader(bytes.NewReader(nil)).(flateReader)
+}}
+
+func compressAscii(src []byte) []byte {
+	var buf bytes.Buffer
+	buf.Grow(len(src)/3 + 64)
+	w := flateWriters.Get().(*flate.Writer)
+	w.Reset(&buf)
+	_, _ = w.Write(src)
+	_ = w.Close()
+	flateWriters.Put(w)
+	return bytes.Clone(buf.Bytes())
+}
+
+func decompressAscii(src []byte, origLen int) []byte {
+	r := flateReaders.Get().(flateReader)
+	_ = r.Reset(bytes.NewReader(src), nil)
+	buf := bytes.NewBuffer(make([]byte, 0, origLen))
+	_, _ = io.Copy(buf, r)
+	flateReaders.Put(r)
+	return buf.Bytes()
 }
 
 func NewCache(maxBytes int64) *Cache {
@@ -82,15 +119,18 @@ func (c *Cache) get(key cacheKey) ([]byte, bool) {
 	}
 	shard := c.shard(key)
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 	el, ok := shard.entries[key]
 	if !ok {
+		shard.mu.Unlock()
 		c.misses.Add(1)
 		return nil, false
 	}
-	c.hits.Add(1)
 	shard.order.MoveToBack(el)
-	return el.Value.(*cacheEntry).ascii, true
+	entry := el.Value.(*cacheEntry)
+	data, origLen := entry.data, entry.origLen
+	shard.mu.Unlock()
+	c.hits.Add(1)
+	return decompressAscii(data, origLen), true
 }
 
 func (c *Cache) put(key cacheKey, ascii []byte) {
@@ -98,7 +138,8 @@ func (c *Cache) put(key cacheKey, ascii []byte) {
 		return
 	}
 	shard := c.shard(key)
-	cost := entryCost(key, ascii)
+	compressed := compressAscii(ascii)
+	cost := entryCost(key, compressed)
 	if cost > shard.maxBytes {
 		c.rejections.Add(1)
 		return
@@ -108,7 +149,8 @@ func (c *Cache) put(key cacheKey, ascii []byte) {
 	if _, ok := shard.entries[key]; ok {
 		return
 	}
-	shard.entries[key] = shard.order.PushBack(&cacheEntry{key: key, ascii: ascii, cost: cost})
+	entry := &cacheEntry{key: key, data: compressed, origLen: len(ascii), cost: cost}
+	shard.entries[key] = shard.order.PushBack(entry)
 	shard.size += cost
 	c.size.Add(cost)
 	for shard.size > shard.maxBytes {
@@ -219,9 +261,6 @@ func (r *Renderer) Render(index, width, height int, keepAspectRatio bool, tier C
 	}
 	putPixBuf(pix)
 
-	if r.cache != nil && cap(ascii) > len(ascii)+len(ascii)/4 {
-		ascii = bytes.Clone(ascii)
-	}
 	r.cache.put(key, ascii)
 	if r.cache != nil {
 		r.cache.renders.Add(1)
