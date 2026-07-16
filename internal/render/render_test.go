@@ -64,7 +64,7 @@ func TestRenderConcurrentSameKey(t *testing.T) {
 	r := NewRenderer(0, [][]byte{jpegBuf.Bytes()}, Options{
 		BrightnessThreshold: 40,
 		Charset:             "standard",
-	}, NewCache(1<<20))
+	}, NewCache(1<<20, false))
 
 	var wg sync.WaitGroup
 	results := make([][]byte, 32)
@@ -104,7 +104,7 @@ func TestRenderCacheEvictsByBytes(t *testing.T) {
 	key := func(index int) cacheKey { return cacheKey{index: index} }
 	payload := incompressible(1000)
 	budget := 3 * entryCost(key(0), compressAscii(payload))
-	c := NewCache(budget)
+	c := NewCache(budget, true)
 	for i := range 5 {
 		c.put(key(i), payload)
 	}
@@ -120,20 +120,22 @@ func TestRenderCacheEvictsByBytes(t *testing.T) {
 }
 
 func TestRenderCacheRoundTrips(t *testing.T) {
-	c := NewCache(1 << 20)
-	want := incompressible(4096)
-	c.put(cacheKey{}, want)
-	got, ok := c.get(cacheKey{})
-	if !ok {
-		t.Fatal("entry should be cached")
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatal("decompressed entry does not match original")
+	for _, compress := range []bool{false, true} {
+		c := NewCache(1<<20, compress)
+		want := incompressible(4096)
+		c.put(cacheKey{}, want)
+		got, ok := c.get(cacheKey{})
+		if !ok {
+			t.Fatalf("compress=%v: entry should be cached", compress)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("compress=%v: entry does not match original", compress)
+		}
 	}
 }
 
 func TestRenderCacheDisabled(t *testing.T) {
-	c := NewCache(0)
+	c := NewCache(0, false)
 	if c != nil {
 		t.Fatal("zero budget should disable the cache")
 	}
@@ -144,7 +146,7 @@ func TestRenderCacheDisabled(t *testing.T) {
 }
 
 func TestRenderCacheRejectsOversizedEntry(t *testing.T) {
-	c := NewCache(256)
+	c := NewCache(256, true)
 	c.put(cacheKey{}, incompressible(10_000))
 	if _, ok := c.get(cacheKey{}); ok {
 		t.Error("entry larger than budget should not be cached")
@@ -155,7 +157,7 @@ func TestRenderCacheRejectsOversizedEntry(t *testing.T) {
 }
 
 func TestRenderCacheAccountsCompressedSize(t *testing.T) {
-	cache := NewCache(512)
+	cache := NewCache(512, true)
 	value := make([]byte, 1, 4096)
 	cache.put(cacheKey{}, value)
 	if _, ok := cache.get(cacheKey{}); !ok {

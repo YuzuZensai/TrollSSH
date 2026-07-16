@@ -29,6 +29,7 @@ type cacheShard struct {
 
 type Cache struct {
 	shards     []cacheShard
+	compress   bool
 	size       atomic.Int64
 	hits       atomic.Uint64
 	misses     atomic.Uint64
@@ -83,12 +84,12 @@ func decompressAscii(src []byte, origLen int) []byte {
 	return buf.Bytes()
 }
 
-func NewCache(maxBytes int64) *Cache {
+func NewCache(maxBytes int64, compress bool) *Cache {
 	if maxBytes <= 0 {
 		return nil
 	}
 	shardCount := int(min(int64(16), max(int64(1), maxBytes/(1<<20))))
-	cache := &Cache{shards: make([]cacheShard, shardCount)}
+	cache := &Cache{shards: make([]cacheShard, shardCount), compress: compress}
 	for i := range cache.shards {
 		cache.shards[i] = cacheShard{
 			maxBytes: maxBytes / int64(shardCount),
@@ -130,6 +131,9 @@ func (c *Cache) get(key cacheKey) ([]byte, bool) {
 	data, origLen := entry.data, entry.origLen
 	shard.mu.Unlock()
 	c.hits.Add(1)
+	if !c.compress {
+		return data, true
+	}
 	return decompressAscii(data, origLen), true
 }
 
@@ -138,8 +142,11 @@ func (c *Cache) put(key cacheKey, ascii []byte) {
 		return
 	}
 	shard := c.shard(key)
-	compressed := compressAscii(ascii)
-	cost := entryCost(key, compressed)
+	data, origLen := ascii, 0
+	if c.compress {
+		data, origLen = compressAscii(ascii), len(ascii)
+	}
+	cost := entryCost(key, data)
 	if cost > shard.maxBytes {
 		c.rejections.Add(1)
 		return
@@ -149,7 +156,7 @@ func (c *Cache) put(key cacheKey, ascii []byte) {
 	if _, ok := shard.entries[key]; ok {
 		return
 	}
-	entry := &cacheEntry{key: key, data: compressed, origLen: len(ascii), cost: cost}
+	entry := &cacheEntry{key: key, data: data, origLen: origLen, cost: cost}
 	shard.entries[key] = shard.order.PushBack(entry)
 	shard.size += cost
 	c.size.Add(cost)

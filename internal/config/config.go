@@ -33,6 +33,7 @@ type Config struct {
 	MaxTerminalCells    int
 	SessionTimeout      time.Duration
 	RenderCacheMB       int
+	RenderCacheCompress bool
 	BrightnessThreshold int
 	Charset             string
 	Invert              bool
@@ -133,6 +134,7 @@ func Load() Config {
 		MaxTerminalCells:    envInt("MAX_TERMINAL_CELLS", 500*512, 1, maxInt),
 		SessionTimeout:      envDurationMs("SESSION_TIMEOUT", 10*time.Minute),
 		RenderCacheMB:       envInt("RENDER_CACHE_MB", 256, 0, maxInt),
+		RenderCacheCompress: envBool("RENDER_CACHE_COMPRESS", false),
 		BrightnessThreshold: envInt("BRIGHTNESS_THRESHOLD", 40, 0, 100),
 		Charset:             envString("CHARSET", "detailed"),
 		Invert:              envBool("INVERT", false),

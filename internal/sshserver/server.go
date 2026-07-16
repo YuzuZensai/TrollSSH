@@ -232,7 +232,7 @@ func clampTermSize(cols, rows, maxDimension, maxCells, quantum int) (int, int) {
 func New(deps ServerDeps) *Server {
 	cfg := deps.Config
 
-	cache := render.NewCache(int64(cfg.RenderCacheMB) << 20)
+	cache := render.NewCache(int64(cfg.RenderCacheMB)<<20, cfg.RenderCacheCompress)
 	sets := make([]frameSet, len(deps.VideoSets))
 	for i, data := range deps.VideoSets {
 		sets[i] = frameSet{
