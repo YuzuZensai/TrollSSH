@@ -3,13 +3,14 @@ package main
 import (
 	"bytes"
 	"container/list"
-	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/image/draw"
@@ -64,6 +65,8 @@ func resolveCharset(charset string) string {
 	return charset
 }
 
+const maxPooledBuffer = 4 << 20
+
 var pixPool sync.Pool
 
 func getPixBuf(n int) []byte {
@@ -76,7 +79,9 @@ func getPixBuf(n int) []byte {
 }
 
 func putPixBuf(b []byte) {
-	pixPool.Put(&b)
+	if cap(b) <= maxPooledBuffer {
+		pixPool.Put(&b)
+	}
 }
 
 var outPool sync.Pool
@@ -91,7 +96,9 @@ func getOutBuf(capacity int) []byte {
 }
 
 func putOutBuf(b []byte) {
-	outPool.Put(&b)
+	if cap(b) <= maxPooledBuffer {
+		outPool.Put(&b)
+	}
 }
 
 func resizeFrame(frame, pix []byte, width, height int, keepAspectRatio bool) (*image.RGBA, error) {
@@ -149,16 +156,20 @@ func rampIndex(brightness, threshold, total int, invert bool) int {
 	return index
 }
 
-func frameToAscii(img *image.RGBA, rampLUT *[101][]byte) string {
+func frameToAscii(img *image.RGBA, rampLUT *[101][]byte) []byte {
 	pix := img.Pix
-	buf := getOutBuf(len(pix))
+	maxCharBytes := 1
+	for _, char := range rampLUT {
+		maxCharBytes = max(maxCharBytes, len(char))
+	}
+	buf := getOutBuf(len(pix) / 4 * maxCharBytes)
 	for o := 0; o < len(pix); o += 4 {
 		brightness := (int(pix[o])*299 + int(pix[o+1])*587 + int(pix[o+2])*114) / 255 / 10
 		buf = append(buf, rampLUT[brightness]...)
 	}
-	ascii := string(buf)
+	output := bytes.Clone(buf)
 	putOutBuf(buf)
-	return ascii
+	return output
 }
 
 const ansiReset = "\x1b[0m"
@@ -208,97 +219,181 @@ func appendColor(buf []byte, r, g, b uint8, tier colorTier) []byte {
 	return append(buf, 'm')
 }
 
-func frameToAnsi(img *image.RGBA, rampLUT *[101][]byte, tier colorTier) string {
+func frameToAnsi(img *image.RGBA, rampLUT *[101][]byte, tier colorTier) []byte {
 	bounds := img.Bounds()
-	buf := getOutBuf(bounds.Dx() * bounds.Dy() * 16)
+	bytesPerCell := 11
+	if tier == colorTierTrueColor {
+		bytesPerCell = 16
+	}
+	buf := getOutBuf(bounds.Dx() * bounds.Dy() * bytesPerCell)
 	var lastR, lastG, lastB uint8
+	last256 := -1
 	first := true
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		o := img.PixOffset(bounds.Min.X, y)
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			o := img.PixOffset(x, y)
 			r, g, bl := img.Pix[o], img.Pix[o+1], img.Pix[o+2]
 			brightness := (int(r)*299 + int(g)*587 + int(bl)*114) / 255 / 10
-			if first || r != lastR || g != lastG || bl != lastB {
+			colorChanged := first || r != lastR || g != lastG || bl != lastB
+			if tier == colorTier256 {
+				index := quantize256(r, g, bl)
+				colorChanged = first || index != last256
+				last256 = index
+			}
+			if colorChanged {
 				buf = appendColor(buf, r, g, bl, tier)
 				lastR, lastG, lastB = r, g, bl
 				first = false
 			}
 			buf = append(buf, rampLUT[brightness]...)
+			o += 4
 		}
 		if y < bounds.Max.Y-1 {
-			buf = append(buf, ansiReset+"\r\n"...)
-			first = true
+			buf = append(buf, "\r\n"...)
 		}
 	}
 	buf = append(buf, ansiReset...)
-	ascii := string(buf)
+	output := bytes.Clone(buf)
 	putOutBuf(buf)
-	return ascii
+	return output
 }
 
-type renderCache struct {
+type cacheKey struct {
+	setID           int
+	index           int
+	width           int
+	height          int
+	keepAspectRatio bool
+	tier            colorTier
+}
+
+type renderCacheShard struct {
 	mu       sync.Mutex
 	maxBytes int64
 	size     int64
-	entries  map[string]*list.Element
+	entries  map[cacheKey]*list.Element
 	order    *list.List
 }
 
-type cacheEntry struct {
-	key   string
-	ascii string
+type renderCache struct {
+	shards     []renderCacheShard
+	size       atomic.Int64
+	hits       atomic.Uint64
+	misses     atomic.Uint64
+	evictions  atomic.Uint64
+	rejections atomic.Uint64
+	renders    atomic.Uint64
+	renderNs   atomic.Uint64
 }
 
-func entryCost(key, ascii string) int64 {
-	return int64(len(key)+len(ascii)) + 128
+type cacheEntry struct {
+	key   cacheKey
+	ascii []byte
+	cost  int64
+}
+
+func entryCost(_ cacheKey, ascii []byte) int64 {
+	return int64(cap(ascii)) + 160
 }
 
 func newRenderCache(maxBytes int64) *renderCache {
 	if maxBytes <= 0 {
 		return nil
 	}
-	return &renderCache{
-		maxBytes: maxBytes,
-		entries:  make(map[string]*list.Element),
-		order:    list.New(),
+	shardCount := int(min(int64(16), max(int64(1), maxBytes/(1<<20))))
+	cache := &renderCache{shards: make([]renderCacheShard, shardCount)}
+	for i := range cache.shards {
+		cache.shards[i] = renderCacheShard{
+			maxBytes: maxBytes / int64(shardCount),
+			entries:  make(map[cacheKey]*list.Element),
+			order:    list.New(),
+		}
 	}
+	return cache
 }
 
-func (c *renderCache) get(key string) (string, bool) {
+func (c *renderCache) shard(key cacheKey) *renderCacheShard {
+	hash := uint64(key.setID)*0x9e3779b185ebca87 ^ uint64(key.index)*0xc2b2ae3d27d4eb4f
+	hash ^= uint64(key.width)<<32 | uint64(uint32(key.height))
+	hash ^= uint64(key.tier)<<1 | uint64(boolToInt(key.keepAspectRatio))
+	return &c.shards[hash%uint64(len(c.shards))]
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func (c *renderCache) get(key cacheKey) ([]byte, bool) {
 	if c == nil {
-		return "", false
+		return nil, false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	el, ok := c.entries[key]
+	shard := c.shard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	el, ok := shard.entries[key]
 	if !ok {
-		return "", false
+		c.misses.Add(1)
+		return nil, false
 	}
-	c.order.MoveToBack(el)
+	c.hits.Add(1)
+	shard.order.MoveToBack(el)
 	return el.Value.(*cacheEntry).ascii, true
 }
 
-func (c *renderCache) put(key, ascii string) {
+func (c *renderCache) put(key cacheKey, ascii []byte) {
 	if c == nil {
 		return
 	}
+	shard := c.shard(key)
 	cost := entryCost(key, ascii)
-	if cost > c.maxBytes {
+	if cost > shard.maxBytes {
+		c.rejections.Add(1)
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.entries[key]; ok {
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if _, ok := shard.entries[key]; ok {
 		return
 	}
-	c.entries[key] = c.order.PushBack(&cacheEntry{key, ascii})
-	c.size += cost
-	for c.size > c.maxBytes {
-		oldest := c.order.Front()
-		c.order.Remove(oldest)
+	shard.entries[key] = shard.order.PushBack(&cacheEntry{key: key, ascii: ascii, cost: cost})
+	shard.size += cost
+	c.size.Add(cost)
+	for shard.size > shard.maxBytes {
+		oldest := shard.order.Front()
+		shard.order.Remove(oldest)
 		evicted := oldest.Value.(*cacheEntry)
-		delete(c.entries, evicted.key)
-		c.size -= entryCost(evicted.key, evicted.ascii)
+		delete(shard.entries, evicted.key)
+		shard.size -= evicted.cost
+		c.size.Add(-evicted.cost)
+		c.evictions.Add(1)
+	}
+}
+
+type renderCacheStats struct {
+	SizeBytes  int64
+	Hits       uint64
+	Misses     uint64
+	Evictions  uint64
+	Rejections uint64
+	Renders    uint64
+	RenderTime time.Duration
+}
+
+func (c *renderCache) stats() renderCacheStats {
+	if c == nil {
+		return renderCacheStats{}
+	}
+	return renderCacheStats{
+		SizeBytes:  c.size.Load(),
+		Hits:       c.hits.Load(),
+		Misses:     c.misses.Load(),
+		Evictions:  c.evictions.Load(),
+		Rejections: c.rejections.Load(),
+		Renders:    c.renders.Load(),
+		RenderTime: time.Duration(c.renderNs.Load()),
 	}
 }
 
@@ -310,7 +405,13 @@ type FrameRenderer struct {
 	cache       *renderCache
 
 	inflightMu sync.Mutex
-	inflight   map[string]chan struct{}
+	inflight   map[cacheKey]*renderCall
+}
+
+type renderCall struct {
+	done  chan struct{}
+	value []byte
+	err   error
 }
 
 func newFrameRenderer(setID int, colorFrames [][]byte, options asciiOptions, cache *renderCache) *FrameRenderer {
@@ -321,47 +422,46 @@ func newFrameRenderer(setID int, colorFrames [][]byte, options asciiOptions, cac
 		options:     options,
 		rampLUT:     buildRampLUT(ramp, options),
 		cache:       cache,
-		inflight:    make(map[string]chan struct{}),
+		inflight:    make(map[cacheKey]*renderCall),
 	}
 }
 
-func (r *FrameRenderer) render(index, width, height int, keepAspectRatio bool, tier colorTier) (string, error) {
-	key := fmt.Sprintf("%d:%d:%dx%d:%t:%d", r.setID, index, width, height, keepAspectRatio, tier)
+func (r *FrameRenderer) render(index, width, height int, keepAspectRatio bool, tier colorTier) ([]byte, error) {
+	key := cacheKey{r.setID, index, width, height, keepAspectRatio, tier}
 	if ascii, ok := r.cache.get(key); ok {
 		return ascii, nil
 	}
 
-	if r.cache != nil {
-		for {
-			r.inflightMu.Lock()
-			wait, ok := r.inflight[key]
-			if !ok {
-				done := make(chan struct{})
-				r.inflight[key] = done
-				r.inflightMu.Unlock()
-				defer func() {
-					r.inflightMu.Lock()
-					delete(r.inflight, key)
-					r.inflightMu.Unlock()
-					close(done)
-				}()
-				break
-			}
-			r.inflightMu.Unlock()
-			<-wait
-			if ascii, ok := r.cache.get(key); ok {
-				return ascii, nil
-			}
-		}
+	r.inflightMu.Lock()
+	if call, ok := r.inflight[key]; ok {
+		r.inflightMu.Unlock()
+		<-call.done
+		return call.value, call.err
+	}
+	call := &renderCall{done: make(chan struct{})}
+	r.inflight[key] = call
+	r.inflightMu.Unlock()
+	defer func() {
+		r.inflightMu.Lock()
+		delete(r.inflight, key)
+		r.inflightMu.Unlock()
+		close(call.done)
+	}()
+
+	if ascii, ok := r.cache.get(key); ok {
+		call.value = ascii
+		return ascii, nil
 	}
 
+	started := time.Now()
 	pix := getPixBuf(4 * width * height)
 	img, err := resizeFrame(r.colorFrames[index], pix, width, height, keepAspectRatio)
 	if err != nil {
 		putPixBuf(pix)
-		return "", err
+		call.err = err
+		return nil, err
 	}
-	var ascii string
+	var ascii []byte
 	if tier == colorTierNone {
 		ascii = frameToAscii(img, r.rampLUT)
 	} else {
@@ -369,6 +469,14 @@ func (r *FrameRenderer) render(index, width, height int, keepAspectRatio bool, t
 	}
 	putPixBuf(pix)
 
+	if r.cache != nil && cap(ascii) > len(ascii)+len(ascii)/4 {
+		ascii = bytes.Clone(ascii)
+	}
 	r.cache.put(key, ascii)
+	if r.cache != nil {
+		r.cache.renders.Add(1)
+		r.cache.renderNs.Add(uint64(time.Since(started)))
+	}
+	call.value = ascii
 	return ascii, nil
 }
