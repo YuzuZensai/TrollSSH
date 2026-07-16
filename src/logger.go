@@ -47,18 +47,20 @@ func sanitizeN(value any, maxLength int) string {
 		str = fmt.Sprint(v)
 	}
 	var b strings.Builder
+	count := 0
 	for _, r := range str {
+		if count >= maxLength {
+			b.WriteRune('…')
+			return b.String()
+		}
 		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			b.WriteRune('�')
 		} else {
 			b.WriteRune(r)
 		}
+		count++
 	}
-	out := []rune(b.String())
-	if len(out) > maxLength {
-		return string(out[:maxLength]) + "…"
-	}
-	return string(out)
+	return b.String()
 }
 
 func emit(level logLevel, name string, stream *os.File, args []any) {
