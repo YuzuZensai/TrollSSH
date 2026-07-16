@@ -1,4 +1,4 @@
-package main
+package tsf
 
 import (
 	"bufio"
@@ -6,53 +6,9 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"sync"
 )
 
-// .tsf container, little-endian: "TSFR" | version uint16 | fps float64 |
-// count uint32 | count × (colorLen uint32, color JPEG).
-const (
-	tsfMagic         = "TSFR"
-	tsfVersion       = 1
-	maxTSFFPS        = 240
-	maxTSFFrameCount = 10_000_000
-)
-
-type frameFile struct {
-	data    []byte
-	cleanup func() error
-	once    sync.Once
-	err     error
-}
-
-func (f *frameFile) Close() error {
-	if f == nil {
-		return nil
-	}
-	f.once.Do(func() {
-		if f.cleanup != nil {
-			f.err = f.cleanup()
-		}
-		f.data = nil
-	})
-	return f.err
-}
-
-var frameFileOwners sync.Map // map[*FramesContainer]*frameFile
-
-func (data *FramesContainer) Close() error {
-	if data == nil {
-		return nil
-	}
-	owner, ok := frameFileOwners.LoadAndDelete(data)
-	if !ok {
-		return nil
-	}
-	data.ColorFrames = nil
-	return owner.(*frameFile).Close()
-}
-
-func writeTSF(output string, data *FramesContainer) error {
+func Write(output string, data *FramesContainer) error {
 	if data == nil {
 		return fmt.Errorf("cannot write nil frames container")
 	}
@@ -99,7 +55,7 @@ func writeTSF(output string, data *FramesContainer) error {
 	return w.Flush()
 }
 
-func loadTSF(filename string) (*FramesContainer, error) {
+func Load(filename string) (*FramesContainer, error) {
 	file, err := readFrameFile(filename)
 	if err != nil {
 		return nil, err

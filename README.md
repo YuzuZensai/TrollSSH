@@ -25,7 +25,7 @@ Generate a frame set from a video through container image
 
 ```sh
 docker run --rm -v ./video.mp4:/home/app/video.mp4 -v ./frames:/home/app/frames \
-    ghcr.io/yuzuzensai/trollssh:v1.0.1 trollssh --generate --video video.mp4 --resolution 512
+    ghcr.io/yuzuzensai/trollssh:v1.1.1 trollssh --generate --video video.mp4 --resolution 512
 ```
 
 This writes `frames/<name>.tsf`, a simple container of color JPEG frames plus
@@ -81,25 +81,29 @@ Optional text files in `data/` (created next to the binary):
 Requirements: Go 1.25+ and `ffmpeg` / `ffprobe` on `PATH` (only for
 `--generate`).
 
+The entry point lives in [`cmd/trollssh`](cmd/trollssh); the packages it wires
+together are under [`internal/`](internal) (`config`, `logx`, `render`, `tsf`,
+`sshserver`).
+
 ```sh
-go run ./src --generate --video video.mp4 --resolution 512
-go run ./src
+go run ./cmd/trollssh --generate --video video.mp4 --resolution 512
+go run ./cmd/trollssh
 ```
 
 Or build a binary:
 
 ```sh
-go build -o trollssh ./src
+go build -o trollssh ./cmd/trollssh
 ./trollssh
 ```
 
 CI runs the following checks on every push:
 
 ```sh
-gofmt -l ./src                    # format
-go vet ./src/...                  # vet
-golangci-lint run ./src/...       # lint, see https://golangci-lint.run
-go test ./src/...                 # tests
+gofmt -l .                        # format
+go vet ./...                      # vet
+golangci-lint run ./...           # lint, see https://golangci-lint.run
+go test ./...                     # tests
 ```
 
 To run them automatically before each commit, install

@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/YuzuZensai/TrollSSH/internal/logx"
 )
 
 type PlaybackMode string
@@ -39,7 +41,7 @@ type Config struct {
 }
 
 func warnInvalid(name, value string, fallback any) {
-	logWarn(fmt.Sprintf("Invalid %s=%q, using default %v", name, sanitize(value), fallback))
+	logx.Warn(fmt.Sprintf("Invalid %s=%q, using default %v", name, logx.Sanitize(value), fallback))
 }
 
 func envString(name, fallback string) string {
@@ -113,7 +115,7 @@ func envPlaybackMode(name string, fallback PlaybackMode) PlaybackMode {
 	return fallback
 }
 
-func loadConfig() Config {
+func Load() Config {
 	const maxInt = int(^uint(0) >> 1)
 	return Config{
 		Host:                envString("HOST", "0.0.0.0"),
@@ -139,7 +141,7 @@ func loadConfig() Config {
 	}
 }
 
-func loadOptionalTextFile(filePath string) (string, bool) {
+func LoadOptionalTextFile(filePath string) (string, bool) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", false

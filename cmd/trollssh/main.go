@@ -15,6 +15,11 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/YuzuZensai/TrollSSH/internal/config"
+	"github.com/YuzuZensai/TrollSSH/internal/logx"
+	"github.com/YuzuZensai/TrollSSH/internal/sshserver"
+	"github.com/YuzuZensai/TrollSSH/internal/tsf"
 )
 
 type cliArgs struct {
@@ -47,7 +52,7 @@ func parseArgs(argv []string) cliArgs {
 }
 
 func fail(message string) {
-	logError(message)
+	logx.Error(message)
 	os.Exit(1)
 }
 
@@ -77,15 +82,15 @@ func generateFrames(framesDir, videoArg string, resolution int) {
 	base := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
 	output := filepath.Join(framesDir, base+".tsf")
 
-	logInfo(fmt.Sprintf("Generating frames from %q -> %s", videoPath, output))
-	if err := processVideo(videoPath, output, resolution); err != nil {
+	logx.Info(fmt.Sprintf("Generating frames from %q -> %s", videoPath, output))
+	if err := tsf.ProcessVideo(videoPath, output, resolution); err != nil {
 		fail(fmt.Sprintf("Failed to generate frames from %q: %s", videoPath, err.Error()))
 	}
 }
 
 const frameDataWarnBytes = 2 << 30
 
-func loadAllFrames(framesDir string) []*FramesContainer {
+func loadAllFrames(framesDir string) []*tsf.FramesContainer {
 	entries, err := os.ReadDir(framesDir)
 	var files []string
 	if err == nil {
@@ -112,17 +117,17 @@ func loadAllFrames(framesDir string) []*FramesContainer {
 		totalBytes += info.Size()
 	}
 	if totalBytes > frameDataWarnBytes {
-		logWarn(fmt.Sprintf(
+		logx.Warn(fmt.Sprintf(
 			"Frame data is %.1f MB of mapped memory; make sure the container memory limit leaves headroom",
 			float64(totalBytes)/(1<<20),
 		))
 	} else {
-		logInfo(fmt.Sprintf("Frame data: %.1f MB", float64(totalBytes)/(1<<20)))
+		logx.Info(fmt.Sprintf("Frame data: %.1f MB", float64(totalBytes)/(1<<20)))
 	}
 
 	concurrency := min(len(files), max(1, min(runtime.NumCPU(), 4)))
 
-	results := make([]*FramesContainer, len(files))
+	results := make([]*tsf.FramesContainer, len(files))
 	errs := make([]error, len(files))
 	var next int
 	var nextMu sync.Mutex
@@ -145,14 +150,14 @@ func loadAllFrames(framesDir string) []*FramesContainer {
 				errs[i] = err
 				return
 			}
-			logInfo(fmt.Sprintf("Loading %s (%.1f MB)...", file, float64(info.Size())/1024/1024))
-			data, err := loadTSF(filePath)
+			logx.Info(fmt.Sprintf("Loading %s (%.1f MB)...", file, float64(info.Size())/1024/1024))
+			data, err := tsf.Load(filePath)
 			if err != nil {
 				errs[i] = err
 				return
 			}
 			data.Name = file
-			logInfo(fmt.Sprintf("  %s: %d frames @ %gfps", file, len(data.ColorFrames), data.FPS))
+			logx.Info(fmt.Sprintf("  %s: %d frames @ %gfps", file, len(data.ColorFrames), data.FPS))
 			results[i] = data
 		}
 	}
@@ -189,17 +194,17 @@ func applyMemoryLimit() {
 		}
 		limit := n * 9 / 10
 		debug.SetMemoryLimit(limit)
-		logInfo(fmt.Sprintf("Memory limit set to %d MB (90%% of cgroup limit)", limit>>20))
+		logx.Info(fmt.Sprintf("Memory limit set to %d MB (90%% of cgroup limit)", limit>>20))
 		return
 	}
 }
 
 func main() {
 	_ = godotenv.Load()
-	logThreshold = resolveThreshold()
+	logx.SetThreshold(logx.ResolveThreshold())
 	applyMemoryLimit()
 
-	config := loadConfig()
+	cfg := config.Load()
 	args := parseArgs(os.Args[1:])
 
 	cwd, err := os.Getwd()
@@ -219,25 +224,25 @@ func main() {
 	}
 
 	var bannerText, fakeLoginText, goodbyeText *string
-	if text, ok := loadOptionalTextFile(filepath.Join(dataDir, "banner.txt")); ok {
+	if text, ok := config.LoadOptionalTextFile(filepath.Join(dataDir, "banner.txt")); ok {
 		bannerText = &text
 	}
-	if text, ok := loadOptionalTextFile(filepath.Join(dataDir, "fakelogin.txt")); ok {
+	if text, ok := config.LoadOptionalTextFile(filepath.Join(dataDir, "fakelogin.txt")); ok {
 		fakeLoginText = &text
 	}
-	if text, ok := loadOptionalTextFile(filepath.Join(dataDir, "goodbye.txt")); ok {
+	if text, ok := config.LoadOptionalTextFile(filepath.Join(dataDir, "goodbye.txt")); ok {
 		goodbyeText = &text
 	}
 
-	hostKeys, err := ensureHostKeys(dataDir)
+	hostKeys, err := sshserver.EnsureHostKeys(dataDir)
 	if err != nil {
 		fail(err.Error())
 	}
 	videoSets := loadAllFrames(framesDir)
-	logInfo(fmt.Sprintf("Loaded %d frame set(s)", len(videoSets)))
+	logx.Info(fmt.Sprintf("Loaded %d frame set(s)", len(videoSets)))
 
-	server := createServer(ServerDeps{
-		Config:        config,
+	server := sshserver.New(sshserver.ServerDeps{
+		Config:        cfg,
 		HostKeys:      hostKeys,
 		BannerText:    bannerText,
 		FakeLoginText: fakeLoginText,
@@ -250,14 +255,14 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		logInfo(fmt.Sprintf("Received %s, shutting down...", sig))
+		logx.Info(fmt.Sprintf("Received %s, shutting down...", sig))
 		forceExit := time.AfterFunc(5*time.Second, func() { os.Exit(0) })
 		server.Close()
 		forceExit.Stop()
 	}()
 
-	if err := server.Listen(config.Host, config.Port); err != nil {
-		logError("Server error:", err.Error())
+	if err := server.Listen(cfg.Host, cfg.Port); err != nil {
+		logx.Error("Server error:", err.Error())
 		os.Exit(1)
 	}
 }

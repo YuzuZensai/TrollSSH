@@ -1,13 +1,32 @@
-package main
+package sshserver
 
 import (
-	"bytes"
-	"image"
 	"sync"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestConnectionTracker(t *testing.T) {
+	tr := newConnectionTracker()
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); !ok {
+		t.Fatal("first acquire failed")
+	}
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); !ok {
+		t.Fatal("second acquire failed")
+	}
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); ok {
+		t.Error("expected per-ip limit rejection")
+	}
+	tr.release("1.2.3.4")
+	tr.release("1.2.3.4")
+	if tr.totalCount() != 0 {
+		t.Errorf("total = %d", tr.totalCount())
+	}
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); !ok {
+		t.Error("limit should be cleared")
+	}
+}
 
 func TestConnectionTrackerConcurrentLimit(t *testing.T) {
 	tracker := newConnectionTracker()
@@ -83,45 +102,36 @@ func TestTermSizeDebouncesResize(t *testing.T) {
 	}
 }
 
-func TestAnsi256CoalescesQuantizedColors(t *testing.T) {
-	img := &image.RGBA{
-		Pix:    []byte{96, 96, 96, 255, 100, 100, 100, 255},
-		Stride: 8,
-		Rect:   image.Rect(0, 0, 2, 1),
+func TestClampTermSize(t *testing.T) {
+	w, h := clampTermSize(1000, 500, 512, 65536, 4)
+	if w < 1 || h < 1 || w > 512 || h > 512 || w*h > 65536 {
+		t.Fatalf("clamped size = %dx%d", w, h)
 	}
-	output := frameToAnsi(img, buildRampLUT([]rune(" .#"), asciiOptions{}), colorTier256)
-	if count := bytes.Count(output, []byte("\x1b[38;5;")); count != 1 {
-		t.Fatalf("color escape count = %d, want 1: %q", count, output)
+	if w%4 != 0 || h%4 != 0 {
+		t.Fatalf("size is not quantized: %dx%d", w, h)
 	}
-}
-
-func TestAnsiDoesNotResetEachRow(t *testing.T) {
-	img := &image.RGBA{
-		Pix:    []byte{100, 100, 100, 255, 100, 100, 100, 255},
-		Stride: 4,
-		Rect:   image.Rect(0, 0, 1, 2),
-	}
-	output := frameToAnsi(img, buildRampLUT([]rune(" .#"), asciiOptions{}), colorTierTrueColor)
-	if count := bytes.Count(output, []byte(ansiReset)); count != 1 {
-		t.Fatalf("reset count = %d, want 1: %q", count, output)
+	w, h = clampTermSize(3, 2, 100, 100, 4)
+	if w != 3 || h != 2 {
+		t.Fatalf("small size = %dx%d", w, h)
 	}
 }
 
-func TestRenderCacheAccountsRetainedCapacity(t *testing.T) {
-	cache := newRenderCache(512)
-	value := make([]byte, 1, 4096)
-	cache.put(cacheKey{}, value)
-	if _, ok := cache.get(cacheKey{}); ok {
-		t.Fatal("cache accepted an entry whose backing allocation exceeds its budget")
+func TestParseDimsPtyReq(t *testing.T) {
+	// "xterm" + cols=100 rows=40 + widthpx + heightpx
+	payload := []byte{
+		0, 0, 0, 5, 'x', 't', 'e', 'r', 'm',
+		0, 0, 0, 100,
+		0, 0, 0, 40,
+		0, 0, 0, 0,
+		0, 0, 0, 0,
 	}
-	if cache.stats().Rejections != 1 {
-		t.Fatalf("rejections = %d, want 1", cache.stats().Rejections)
+	cols, rows, ok := parseDims(payload)
+	if !ok || cols != 100 || rows != 40 {
+		t.Errorf("parseDims = %d,%d,%v", cols, rows, ok)
 	}
-}
 
-func TestSanitizeNStopsAtLimit(t *testing.T) {
-	input := "ab\x00cdefghijklmnopqrstuvwxyz"
-	if got := sanitizeN(input, 4); got != "ab�c…" {
-		t.Fatalf("sanitizeN = %q", got)
+	term, ok := parsePtyTerm(payload)
+	if !ok || term != "xterm" {
+		t.Errorf("parsePtyTerm = %q,%v", term, ok)
 	}
 }

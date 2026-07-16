@@ -1,4 +1,4 @@
-package main
+package tsf
 
 import (
 	"bufio"
@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/YuzuZensai/TrollSSH/internal/logx"
 )
 
 var (
@@ -303,7 +305,7 @@ func extractFrames(path, vf, label string, totalFrames int, emit func([]byte) er
 	return frameCount, nil
 }
 
-func processVideo(path, output string, maxDimension int) error {
+func ProcessVideo(path, output string, maxDimension int) error {
 	probeCmd := exec.Command(
 		"ffprobe", "-v", "error",
 		"-show_streams", "-show_format",
@@ -364,6 +366,6 @@ func processVideo(path, output string, maxDimension int) error {
 	if err := outputFile.commit(output); err != nil {
 		return err
 	}
-	logInfo(fmt.Sprintf("Saved %d frames to %s", frameCount, output))
+	logx.Info(fmt.Sprintf("Saved %d frames to %s", frameCount, output))
 	return nil
 }

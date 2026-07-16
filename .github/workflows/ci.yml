@@ -21,10 +21,10 @@ jobs:
                   go-version-file: go.mod
 
             - name: Format check
-              run: test -z "$(gofmt -l src)"
+              run: test -z "$(gofmt -l .)"
 
             - name: Vet
-              run: go vet ./src/
+              run: go vet ./...
 
             - name: Staticcheck
               uses: dominikh/staticcheck-action@v1
@@ -33,14 +33,12 @@ jobs:
 
             - name: golangci-lint
               uses: golangci/golangci-lint-action@v7
-              with:
-                  working-directory: src
 
             - name: Build
-              run: go build -o trollssh ./src
+              run: go build -o trollssh ./cmd/trollssh
 
             - name: Unit tests
-              run: go test -race ./src/
+              run: go test -race ./...
 
     docker:
         needs: test

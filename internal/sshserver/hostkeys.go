@@ -1,4 +1,4 @@
-package main
+package sshserver
 
 import (
 	"crypto/ed25519"
@@ -33,7 +33,7 @@ func generateAndSave(keyPath, keyType string) error {
 	return os.WriteFile(keyPath, pem.EncodeToMemory(block), 0o600)
 }
 
-func ensureHostKeys(configDir string) ([]ssh.Signer, error) {
+func EnsureHostKeys(configDir string) ([]ssh.Signer, error) {
 	keys := []struct{ file, keyType string }{
 		{"id_rsa", "rsa"},
 		{"id_ed25519", "ed25519"},

@@ -1,4 +1,4 @@
-package main
+package logx
 
 import (
 	"encoding/json"
@@ -8,35 +8,37 @@ import (
 	"time"
 )
 
-type logLevel int
+type Level int
 
 const (
-	levelDebug logLevel = 10
-	levelInfo  logLevel = 20
-	levelWarn  logLevel = 30
-	levelError logLevel = 40
+	LevelDebug Level = 10
+	LevelInfo  Level = 20
+	LevelWarn  Level = 30
+	LevelError Level = 40
 )
 
-var logThreshold = resolveThreshold()
+var threshold = ResolveThreshold()
 
-func resolveThreshold() logLevel {
+func ResolveThreshold() Level {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
 	case "debug":
-		return levelDebug
+		return LevelDebug
 	case "warn":
-		return levelWarn
+		return LevelWarn
 	case "error":
-		return levelError
+		return LevelError
 	default:
-		return levelInfo
+		return LevelInfo
 	}
 }
 
-func sanitize(value any) string {
-	return sanitizeN(value, 200)
+func SetThreshold(level Level) { threshold = level }
+
+func Sanitize(value any) string {
+	return SanitizeN(value, 200)
 }
 
-func sanitizeN(value any, maxLength int) string {
+func SanitizeN(value any, maxLength int) string {
 	var str string
 	switch v := value.(type) {
 	case nil:
@@ -63,8 +65,8 @@ func sanitizeN(value any, maxLength int) string {
 	return b.String()
 }
 
-func emit(level logLevel, name string, stream *os.File, args []any) {
-	if level < logThreshold {
+func emit(level Level, name string, stream *os.File, args []any) {
+	if level < threshold {
 		return
 	}
 	parts := make([]string, len(args))
@@ -81,7 +83,7 @@ func emit(level logLevel, name string, stream *os.File, args []any) {
 	_, _ = fmt.Fprintf(stream, "[%s] %-5s %s\n", ts, strings.ToUpper(name), strings.Join(parts, " "))
 }
 
-func logDebug(args ...any) { emit(levelDebug, "debug", os.Stdout, args) }
-func logInfo(args ...any)  { emit(levelInfo, "info", os.Stdout, args) }
-func logWarn(args ...any)  { emit(levelWarn, "warn", os.Stderr, args) }
-func logError(args ...any) { emit(levelError, "error", os.Stderr, args) }
+func Debug(args ...any) { emit(LevelDebug, "debug", os.Stdout, args) }
+func Info(args ...any)  { emit(LevelInfo, "info", os.Stdout, args) }
+func Warn(args ...any)  { emit(LevelWarn, "warn", os.Stderr, args) }
+func Error(args ...any) { emit(LevelError, "error", os.Stderr, args) }
