@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"image"
 	"image/jpeg"
 	"os"
@@ -61,8 +60,9 @@ func TestTSFInvalid(t *testing.T) {
 	}
 
 	// Valid container but fps <= 0.
-	if err := writeTSF(path, &FramesContainer{ColorFrames: [][]byte{{1}}, FPS: 0}); err != nil {
-		t.Fatalf("writeTSF: %v", err)
+	rawInvalidFPS := append(tsfHeader(0, 1), 1, 0, 0, 0, 1)
+	if err := os.WriteFile(path, rawInvalidFPS, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 	if _, err := loadTSF(path); err == nil {
 		t.Error("expected error for fps<=0")
@@ -177,7 +177,7 @@ func TestFrameToAscii(t *testing.T) {
 		Pix:    []byte{0, 0, 0, 255, 255, 255, 255, 255},
 		Stride: 8, Rect: image.Rect(0, 0, 2, 1),
 	}
-	out := []rune(frameToAscii(img, buildRampLUT(ramp, opts)))
+	out := []rune(string(frameToAscii(img, buildRampLUT(ramp, opts))))
 	if out[0] != ramp[0] {
 		t.Errorf("dark px = %q, want %q", out[0], ramp[0])
 	}
@@ -193,7 +193,7 @@ func TestFrameToAsciiInvert(t *testing.T) {
 		Pix:    []byte{255, 255, 255, 255},
 		Stride: 4, Rect: image.Rect(0, 0, 1, 1),
 	}
-	out := []rune(frameToAscii(img, buildRampLUT(ramp, opts)))
+	out := []rune(string(frameToAscii(img, buildRampLUT(ramp, opts))))
 	if out[0] != ramp[0] {
 		t.Errorf("inverted bright = %q, want %q", out[0], ramp[0])
 	}
@@ -215,7 +215,7 @@ func TestRenderConcurrentSameKey(t *testing.T) {
 	}, newRenderCache(1<<20))
 
 	var wg sync.WaitGroup
-	results := make([]string, 32)
+	results := make([][]byte, 32)
 	for i := range results {
 		wg.Add(1)
 		go func(i int) {
@@ -230,25 +230,26 @@ func TestRenderConcurrentSameKey(t *testing.T) {
 	}
 	wg.Wait()
 	for i, got := range results {
-		if got != results[0] {
+		if !bytes.Equal(got, results[0]) {
 			t.Fatalf("result %d differs from result 0", i)
 		}
 	}
 }
 
 func TestRenderCacheEvictsByBytes(t *testing.T) {
-	budget := 3 * entryCost("k", strings.Repeat("x", 1000))
+	key := func(index int) cacheKey { return cacheKey{index: index} }
+	budget := 3 * entryCost(key(0), bytes.Repeat([]byte("x"), 1000))
 	c := newRenderCache(budget)
 	for i := range 5 {
-		c.put(fmt.Sprintf("%d", i), strings.Repeat("x", 1000))
+		c.put(key(i), bytes.Repeat([]byte("x"), 1000))
 	}
-	if c.size > budget {
-		t.Errorf("size %d exceeds budget %d", c.size, budget)
+	if c.size.Load() > budget {
+		t.Errorf("size %d exceeds budget %d", c.size.Load(), budget)
 	}
-	if _, ok := c.get("0"); ok {
+	if _, ok := c.get(key(0)); ok {
 		t.Error("oldest entry should have been evicted")
 	}
-	if _, ok := c.get("4"); !ok {
+	if _, ok := c.get(key(4)); !ok {
 		t.Error("newest entry should be cached")
 	}
 }
@@ -258,49 +259,55 @@ func TestRenderCacheDisabled(t *testing.T) {
 	if c != nil {
 		t.Fatal("zero budget should disable the cache")
 	}
-	c.put("k", "v")
-	if _, ok := c.get("k"); ok {
+	c.put(cacheKey{}, []byte("v"))
+	if _, ok := c.get(cacheKey{}); ok {
 		t.Error("nil cache should never hit")
 	}
 }
 
 func TestRenderCacheRejectsOversizedEntry(t *testing.T) {
 	c := newRenderCache(256)
-	c.put("big", strings.Repeat("x", 10_000))
-	if _, ok := c.get("big"); ok {
+	c.put(cacheKey{}, bytes.Repeat([]byte("x"), 10_000))
+	if _, ok := c.get(cacheKey{}); ok {
 		t.Error("entry larger than budget should not be cached")
 	}
-	if c.size != 0 {
-		t.Errorf("size = %d, want 0", c.size)
+	if c.size.Load() != 0 {
+		t.Errorf("size = %d, want 0", c.size.Load())
 	}
 }
 
 func TestConnectionTracker(t *testing.T) {
 	tr := newConnectionTracker()
-	tr.increment("1.2.3.4")
-	tr.increment("1.2.3.4")
-	if !tr.hasReachedLimits("1.2.3.4", 2, 100) {
-		t.Error("expected per-ip limit reached")
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); !ok {
+		t.Fatal("first acquire failed")
 	}
-	tr.decrement("1.2.3.4")
-	tr.decrement("1.2.3.4")
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); !ok {
+		t.Fatal("second acquire failed")
+	}
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); ok {
+		t.Error("expected per-ip limit rejection")
+	}
+	tr.release("1.2.3.4")
+	tr.release("1.2.3.4")
 	if tr.totalCount() != 0 {
 		t.Errorf("total = %d", tr.totalCount())
 	}
-	if tr.hasReachedLimits("1.2.3.4", 2, 100) {
-		t.Error("should be cleared")
+	if _, _, ok := tr.tryAcquire("1.2.3.4", 2, 100); !ok {
+		t.Error("limit should be cleared")
 	}
 }
 
-func TestClampDimension(t *testing.T) {
-	if clampDimension(0, 100) != 1 {
-		t.Error("floor")
+func TestClampTermSize(t *testing.T) {
+	w, h := clampTermSize(1000, 500, 512, 65536, 4)
+	if w < 1 || h < 1 || w > 512 || h > 512 || w*h > 65536 {
+		t.Fatalf("clamped size = %dx%d", w, h)
 	}
-	if clampDimension(500, 100) != 100 {
-		t.Error("ceil")
+	if w%4 != 0 || h%4 != 0 {
+		t.Fatalf("size is not quantized: %dx%d", w, h)
 	}
-	if clampDimension(50, 100) != 50 {
-		t.Error("passthrough")
+	w, h = clampTermSize(3, 2, 100, 100, 4)
+	if w != 3 || h != 2 {
+		t.Fatalf("small size = %dx%d", w, h)
 	}
 }
 

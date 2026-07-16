@@ -83,6 +83,8 @@ func generateFrames(framesDir, videoArg string, resolution int) {
 	}
 }
 
+const frameDataWarnBytes = 2 << 30
+
 func loadAllFrames(framesDir string) []*FramesContainer {
 	entries, err := os.ReadDir(framesDir)
 	var files []string
@@ -100,6 +102,22 @@ func loadAllFrames(framesDir string) []*FramesContainer {
 			"No frame sets found in %q. Generate one first with: trollssh --generate --video <path>",
 			framesDir,
 		))
+	}
+	var totalBytes int64
+	for _, file := range files {
+		info, err := os.Stat(filepath.Join(framesDir, file))
+		if err != nil {
+			fail(err.Error())
+		}
+		totalBytes += info.Size()
+	}
+	if totalBytes > frameDataWarnBytes {
+		logWarn(fmt.Sprintf(
+			"Frame data is %.1f MB of mapped memory; make sure the container memory limit leaves headroom",
+			float64(totalBytes)/(1<<20),
+		))
+	} else {
+		logInfo(fmt.Sprintf("Frame data: %.1f MB", float64(totalBytes)/(1<<20)))
 	}
 
 	concurrency := min(len(files), max(1, min(runtime.NumCPU(), 4)))
@@ -226,14 +244,16 @@ func main() {
 		GoodbyeText:   goodbyeText,
 		VideoSets:     videoSets,
 	})
+	defer server.Close()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
 		logInfo(fmt.Sprintf("Received %s, shutting down...", sig))
+		forceExit := time.AfterFunc(5*time.Second, func() { os.Exit(0) })
 		server.Close()
-		time.AfterFunc(5*time.Second, func() { os.Exit(0) })
+		forceExit.Stop()
 	}()
 
 	if err := server.Listen(config.Host, config.Port); err != nil {

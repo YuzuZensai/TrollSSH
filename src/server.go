@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"math/rand"
 	"net"
 	"strings"
@@ -14,13 +16,83 @@ import (
 )
 
 const (
-	clearScreen = "\x1b[2J\x1b[0f"
-	hideCursor  = "\x1b[?25l"
-	showCursor  = "\x1b[?25h"
-	syncStart   = "\x1b[?2026h"
-	syncEnd     = "\x1b[?2026l"
-	homeCursor  = "\x1b[H"
+	clearScreen         = "\x1b[2J\x1b[0f"
+	hideCursor          = "\x1b[?25l"
+	showCursor          = "\x1b[?25h"
+	syncStart           = "\x1b[?2026h"
+	syncEnd             = "\x1b[?2026l"
+	homeCursor          = "\x1b[H"
+	maxSessionsPerConn  = 1
+	terminalSizeQuantum = 4
+	resizeDebounce      = 200 * time.Millisecond
+	outputStallTimeout  = 15 * time.Second
 )
+
+var errOutputStalled = errors.New("SSH output stalled")
+
+func writePartsWithTimeout(
+	conn *ssh.ServerConn,
+	channel ssh.Channel,
+	timeout time.Duration,
+	parts ...string,
+) error {
+	write := func() error {
+		for _, part := range parts {
+			if _, err := io.WriteString(channel, part); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if timeout <= 0 {
+		return write()
+	}
+
+	fired := make(chan struct{})
+	timer := time.AfterFunc(timeout, func() {
+		_ = conn.Close()
+		close(fired)
+	})
+	err := write()
+	if timer.Stop() {
+		return err
+	}
+	<-fired
+	return errOutputStalled
+}
+
+func writeFrameWithTimeout(
+	conn *ssh.ServerConn,
+	channel ssh.Channel,
+	timeout time.Duration,
+	prefix string,
+	frame []byte,
+) error {
+	write := func() error {
+		if _, err := io.WriteString(channel, syncStart+prefix); err != nil {
+			return err
+		}
+		if _, err := channel.Write(frame); err != nil {
+			return err
+		}
+		_, err := io.WriteString(channel, syncEnd)
+		return err
+	}
+	if timeout <= 0 {
+		return write()
+	}
+	fired := make(chan struct{})
+	timer := time.AfterFunc(timeout, func() {
+		_ = conn.Close()
+		close(fired)
+	})
+	err := write()
+	if timer.Stop() {
+		return err
+	}
+	<-fired
+	return errOutputStalled
+}
 
 type ConnectionTracker struct {
 	mu     sync.Mutex
@@ -32,15 +104,18 @@ func newConnectionTracker() *ConnectionTracker {
 	return &ConnectionTracker{counts: make(map[string]int)}
 }
 
-func (t *ConnectionTracker) increment(ip string) int {
+func (t *ConnectionTracker) tryAcquire(ip string, maxPerIP, maxTotal int) (int, int, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.total >= maxTotal || t.counts[ip] >= maxPerIP {
+		return t.counts[ip], t.total, false
+	}
 	t.counts[ip]++
 	t.total++
-	return t.counts[ip]
+	return t.counts[ip], t.total, true
 }
 
-func (t *ConnectionTracker) decrement(ip string) {
+func (t *ConnectionTracker) release(ip string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, ok := t.counts[ip]; !ok {
@@ -61,10 +136,40 @@ func (t *ConnectionTracker) totalCount() int {
 	return t.total
 }
 
-func (t *ConnectionTracker) hasReachedLimits(ip string, maxPerIP, maxTotal int) bool {
+type SessionTracker struct {
+	mu      sync.Mutex
+	perConn map[*ssh.ServerConn]int
+	total   int
+}
+
+func newSessionTracker() *SessionTracker {
+	return &SessionTracker{perConn: make(map[*ssh.ServerConn]int)}
+}
+
+func (t *SessionTracker) tryAcquire(conn *ssh.ServerConn, maxPerConn, maxTotal int) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.total >= maxTotal || t.counts[ip] >= maxPerIP
+	if t.total >= maxTotal || t.perConn[conn] >= maxPerConn {
+		return false
+	}
+	t.perConn[conn]++
+	t.total++
+	return true
+}
+
+func (t *SessionTracker) release(conn *ssh.ServerConn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	count := t.perConn[conn]
+	if count <= 0 {
+		return
+	}
+	if count == 1 {
+		delete(t.perConn, conn)
+	} else {
+		t.perConn[conn] = count - 1
+	}
+	t.total--
 }
 
 type frameSet struct {
@@ -76,10 +181,16 @@ type Server struct {
 	config    Config
 	sshConfig *ssh.ServerConfig
 	sets      []frameSet
+	cache     *renderCache
 	tracker   *ConnectionTracker
+	sessions  *SessionTracker
 	fakeLogin *string
 	goodbye   *string
+	mu        sync.Mutex
 	listener  net.Listener
+	conns     map[net.Conn]struct{}
+	connWG    sync.WaitGroup
+	closing   bool
 	closeOnce sync.Once
 }
 
@@ -92,14 +203,25 @@ type ServerDeps struct {
 	VideoSets     []*FramesContainer
 }
 
-func clampDimension(value, max int) int {
-	if value < 1 {
-		return 1
+func clampTermSize(cols, rows, maxDimension, maxCells, quantum int) (int, int) {
+	cols = max(cols, 1)
+	rows = max(rows, 1)
+	scale := min(1.0, float64(maxDimension)/float64(cols), float64(maxDimension)/float64(rows))
+	area := float64(cols) * float64(rows)
+	if area*scale*scale > float64(maxCells) {
+		scale = min(scale, math.Sqrt(float64(maxCells)/area))
 	}
-	if value > max {
-		return max
+	cols = max(1, int(math.Floor(float64(cols)*scale)))
+	rows = max(1, int(math.Floor(float64(rows)*scale)))
+	if quantum > 1 {
+		if cols >= quantum {
+			cols -= cols % quantum
+		}
+		if rows >= quantum {
+			rows -= rows % quantum
+		}
 	}
-	return value
+	return cols, rows
 }
 
 func createServer(deps ServerDeps) *Server {
@@ -155,9 +277,12 @@ func createServer(deps ServerDeps) *Server {
 		config:    config,
 		sshConfig: sshConfig,
 		sets:      sets,
+		cache:     cache,
 		tracker:   newConnectionTracker(),
+		sessions:  newSessionTracker(),
 		fakeLogin: deps.FakeLoginText,
 		goodbye:   deps.GoodbyeText,
+		conns:     make(map[net.Conn]struct{}),
 	}
 }
 
@@ -174,7 +299,14 @@ func (s *Server) Listen(host string, port int) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		_ = listener.Close()
+		return nil
+	}
 	s.listener = listener
+	s.mu.Unlock()
 	logInfo(fmt.Sprintf("TrollSSH listening on %s:%d", host, port))
 	for {
 		conn, err := listener.Accept()
@@ -184,29 +316,68 @@ func (s *Server) Listen(host string, port int) error {
 			}
 			return err
 		}
-		go s.handleConn(conn)
+		ip := hostOnly(conn.RemoteAddr().String())
+		activeForIP, total, ok := s.tracker.tryAcquire(ip, s.config.MaxConnections, s.config.MaxTotalConnections)
+		if !ok {
+			_ = conn.Close()
+			logWarn("Connection rejected (limit reached) from", ip)
+			continue
+		}
+		s.mu.Lock()
+		if s.closing {
+			s.mu.Unlock()
+			s.tracker.release(ip)
+			_ = conn.Close()
+			continue
+		}
+		s.conns[conn] = struct{}{}
+		s.connWG.Add(1)
+		s.mu.Unlock()
+		go s.handleConn(conn, ip, activeForIP, total)
 	}
 }
 
 func (s *Server) Close() {
 	s.closeOnce.Do(func() {
-		if s.listener != nil {
-			_ = s.listener.Close()
+		s.mu.Lock()
+		s.closing = true
+		listener := s.listener
+		conns := make([]net.Conn, 0, len(s.conns))
+		for conn := range s.conns {
+			conns = append(conns, conn)
+		}
+		s.mu.Unlock()
+		if listener != nil {
+			_ = listener.Close()
+		}
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+		s.connWG.Wait()
+		stats := s.cache.stats()
+		if stats.Hits+stats.Misses > 0 {
+			logInfo(fmt.Sprintf(
+				"Render cache: size=%.1fMB hits=%d misses=%d evictions=%d rejected=%d renders=%d render_time=%s",
+				float64(stats.SizeBytes)/(1<<20), stats.Hits, stats.Misses, stats.Evictions,
+				stats.Rejections, stats.Renders, stats.RenderTime,
+			))
+		}
+		for _, set := range s.sets {
+			if err := set.data.Close(); err != nil {
+				logWarn("Failed to release frame set", set.data.Name, sanitize(err.Error()))
+			}
 		}
 	})
 }
 
-func (s *Server) handleConn(conn net.Conn) {
-	ip := hostOnly(conn.RemoteAddr().String())
-
-	if s.tracker.hasReachedLimits(ip, s.config.MaxConnections, s.config.MaxTotalConnections) {
-		_ = conn.Close()
-		logWarn("Connection rejected (limit reached) from", ip)
-		return
-	}
-
-	activeForIP := s.tracker.increment(ip)
-	defer s.tracker.decrement(ip)
+func (s *Server) handleConn(conn net.Conn, ip string, activeForIP, total int) {
+	defer func() {
+		s.tracker.release(ip)
+		s.mu.Lock()
+		delete(s.conns, conn)
+		s.mu.Unlock()
+		s.connWG.Done()
+	}()
 
 	if s.config.HandshakeTimeout > 0 {
 		_ = conn.SetDeadline(time.Now().Add(s.config.HandshakeTimeout))
@@ -229,35 +400,58 @@ func (s *Server) handleConn(conn net.Conn) {
 	setIndex := rand.Intn(len(s.sets))
 	logInfo(fmt.Sprintf(
 		"New connection from %s (ip=%d, total=%d) -> playing %q",
-		ip, activeForIP, s.tracker.totalCount(), s.sets[setIndex].data.Name,
+		ip, activeForIP, total, s.sets[setIndex].data.Name,
 	))
 
 	go ssh.DiscardRequests(reqs)
 
+	var sessionWG sync.WaitGroup
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
+		if !s.sessions.tryAcquire(sshConn, maxSessionsPerConn, s.config.MaxTotalConnections) {
+			_ = newChannel.Reject(ssh.ResourceShortage, "session limit reached")
 			continue
 		}
-		go s.handleSession(sshConn, channel, requests, ip, setIndex)
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			s.sessions.release(sshConn)
+			continue
+		}
+		sessionWG.Add(1)
+		go func() {
+			defer sessionWG.Done()
+			defer s.sessions.release(sshConn)
+			var timer *time.Timer
+			if s.config.SessionTimeout > 0 {
+				timer = time.AfterFunc(s.config.SessionTimeout, func() { _ = sshConn.Close() })
+				defer timer.Stop()
+			}
+			s.handleSession(sshConn, channel, requests, ip, setIndex)
+		}()
 	}
+	_ = sshConn.Close()
+	sessionWG.Wait()
 	logInfo("Client closed connection from", ip)
 }
 
 type termSize struct {
-	mu     sync.Mutex
-	width  int
-	height int
+	mu      sync.Mutex
+	width   int
+	height  int
+	updated time.Time
 }
 
-func (t *termSize) set(w, h, maxDim int) {
+func (t *termSize) set(w, h, maxDimension, maxCells int, force bool) {
 	t.mu.Lock()
-	t.width = clampDimension(w, maxDim)
-	t.height = clampDimension(h, maxDim)
+	if !force && time.Since(t.updated) < resizeDebounce {
+		t.mu.Unlock()
+		return
+	}
+	t.width, t.height = clampTermSize(w, h, maxDimension, maxCells, terminalSizeQuantum)
+	t.updated = time.Now()
 	t.mu.Unlock()
 }
 
@@ -304,20 +498,22 @@ func (s *Server) handleSession(
 	ip string,
 	initialSetIndex int,
 ) {
+	defer func() { _ = channel.Close() }()
 	size := &termSize{}
-	size.set(80, 24, s.config.MaxDimension)
+	size.set(80, 24, s.config.MaxDimension, s.config.MaxTerminalCells, true)
 	tier := colorTierTrueColor
 	if s.config.ForceGrayscale {
 		tier = colorTierNone
 	}
 
 	started := false
+	var playDone chan struct{}
 	for req := range requests {
 		switch req.Type {
 		case "pty-req":
 			logDebug("Opening pty for session", ip)
 			if cols, rows, ok := parseDims(req.Payload); ok {
-				size.set(cols, rows, s.config.MaxDimension)
+				size.set(cols, rows, s.config.MaxDimension, s.config.MaxTerminalCells, true)
 			}
 			if term, ok := parsePtyTerm(req.Payload); ok {
 				tier = detectColorTier(term)
@@ -331,7 +527,7 @@ func (s *Server) handleSession(
 			if len(req.Payload) >= 8 {
 				cols := int(binary.BigEndian.Uint32(req.Payload))
 				rows := int(binary.BigEndian.Uint32(req.Payload[4:]))
-				size.set(cols, rows, s.config.MaxDimension)
+				size.set(cols, rows, s.config.MaxDimension, s.config.MaxTerminalCells, false)
 			}
 			if req.WantReply {
 				_ = req.Reply(true, nil)
@@ -348,20 +544,34 @@ func (s *Server) handleSession(
 			_ = req.Reply(true, nil)
 			if !started {
 				started = true
-				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
+				playDone = make(chan struct{})
+				playTier := tier
+				go func(tier colorTier) {
+					defer close(playDone)
+					s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
+				}(playTier)
 			}
 		case "shell":
 			logDebug("Opening shell for session", ip)
 			_ = req.Reply(true, nil)
 			if !started {
 				started = true
-				go s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
+				playDone = make(chan struct{})
+				playTier := tier
+				go func(tier colorTier) {
+					defer close(playDone)
+					s.playVideo(sshConn, channel, size, ip, initialSetIndex, false, tier)
+				}(playTier)
 			}
 		default:
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
 		}
+	}
+	_ = channel.Close()
+	if playDone != nil {
+		<-playDone
 	}
 }
 
@@ -391,11 +601,16 @@ func (s *Server) playVideo(
 	w, h := size.get()
 	logDebug(fmt.Sprintf("Terminal size %dx%d for %s", w, h, ip))
 
-	defer func() { _, _ = channel.Write([]byte(showCursor)) }()
+	defer func() {
+		_ = writePartsWithTimeout(sshConn, channel, outputStallTimeout, showCursor)
+	}()
 
 	if s.fakeLogin != nil {
-		_, _ = channel.Write([]byte(clearScreen))
-		_, _ = channel.Write([]byte(*s.fakeLogin))
+		if err := writePartsWithTimeout(
+			sshConn, channel, outputStallTimeout, clearScreen, *s.fakeLogin,
+		); err != nil {
+			return
+		}
 	}
 
 	done := make(chan struct{})
@@ -439,13 +654,19 @@ func (s *Server) playVideo(
 		}
 	}()
 
+	loginTimer := time.NewTimer(config.LoginDelay)
 	select {
-	case <-time.After(config.LoginDelay):
+	case <-loginTimer.C:
 	case <-done:
+		if !loginTimer.Stop() {
+			<-loginTimer.C
+		}
 		return
 	}
 
-	_, _ = channel.Write([]byte(hideCursor))
+	if err := writePartsWithTimeout(sshConn, channel, outputStallTimeout, hideCursor); err != nil {
+		return
+	}
 
 	frameInterval := func() time.Duration {
 		return time.Duration(float64(time.Second) / current.data.FPS)
@@ -457,8 +678,6 @@ func (s *Server) playVideo(
 	currentFrame := 0
 	loopCount := 0
 	lastW, lastH := 0, 0
-	var writeBuf []byte
-
 	for {
 		select {
 		case <-done:
@@ -489,11 +708,9 @@ func (s *Server) playVideo(
 				prefix = clearScreen
 				lastW, lastH = w, h
 			}
-			writeBuf = append(writeBuf[:0], syncStart...)
-			writeBuf = append(writeBuf, prefix...)
-			writeBuf = append(writeBuf, ascii...)
-			writeBuf = append(writeBuf, syncEnd...)
-			if _, err := channel.Write(writeBuf); err != nil {
+			if err := writeFrameWithTimeout(
+				sshConn, channel, outputStallTimeout, prefix, ascii,
+			); err != nil {
 				closeSession()
 				return
 			}
@@ -506,11 +723,27 @@ func (s *Server) playVideo(
 			currentFrame = 0
 			loopCount++
 			if config.MaxLoop > 0 && loopCount >= config.MaxLoop {
-				_, _ = channel.Write([]byte(showCursor + clearScreen))
-				if s.goodbye != nil {
-					_, _ = channel.Write([]byte(*s.goodbye))
+				if err := writePartsWithTimeout(
+					sshConn, channel, outputStallTimeout, showCursor, clearScreen,
+				); err != nil {
+					return
 				}
-				time.Sleep(1 * time.Second)
+				if s.goodbye != nil {
+					if err := writePartsWithTimeout(
+						sshConn, channel, outputStallTimeout, *s.goodbye,
+					); err != nil {
+						return
+					}
+				}
+				closeTimer := time.NewTimer(time.Second)
+				select {
+				case <-closeTimer.C:
+				case <-done:
+					if !closeTimer.Stop() {
+						<-closeTimer.C
+					}
+					return
+				}
 				logInfo("Playback finished, closing session", ip)
 				_ = channel.Close()
 				_ = sshConn.Close()
