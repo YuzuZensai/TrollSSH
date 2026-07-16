@@ -1,6 +1,6 @@
 services:
     trollssh:
-        image: ghcr.io/yuzuzensai/trollssh:v1.1.1
+        image: ghcr.io/yuzuzensai/trollssh:v1.1.3
         container_name: trollssh
         restart: unless-stopped
         mem_limit: ${MEMORY_LIMIT:-2g}
